@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 
 from agentscope.message import Msg, TextBlock
 
-from ..config.config import load_agent_config
-from ..constant import DEBUG_HISTORY_FILE, MAX_LOAD_HISTORY_COUNT
+from copaw.config import load_config
+from .memory import enable_proactive_for_session, update_last_interaction_time, get_proactive_config, reset_proactive_session
 
 if TYPE_CHECKING:
     from .memory import MemoryManager
@@ -37,8 +37,7 @@ class ConversationCommandHandlerMixin:
             "compact_str",
             "await_summary",
             "message",
-            "dump_history",
-            "load_history",
+            "proactive",
         },
     )
 
@@ -332,140 +331,130 @@ class CommandHandler(ConversationCommandHandlerMixin):
             f"- **Timestamp:** {msg.timestamp}\n"
             f"- **Name:** {msg.name}\n"
             f"- **Role:** {msg.role}\n"
-            f"- **Content:**\n{content_str}{truncation_hint}",
+            f"- **Content:**\n{msg.content}",
         )
 
-    async def _process_dump_history(
-        self,
-        messages: list[Msg],
-        _args: str = "",
-    ) -> Msg:
-        """Process /dump_history command to save messages to a JSONL file.
-
-        Args:
-            messages: List of messages in memory
-            _args: Command arguments (unused)
-
-        Returns:
-            System message with dump result
-        """
-        agent_config = self._get_agent_config()
-        history_file = Path(agent_config.workspace_dir) / DEBUG_HISTORY_FILE
-
-        try:
-            # Check if there's a compressed summary
-            compressed_summary = self.memory.get_compressed_summary()
-            has_summary = bool(compressed_summary)
-
-            # Build dump messages: summary first (if exists), then messages
-            dump_messages = []
-            if has_summary:
-                summary_msg = Msg(
-                    name="user",
-                    role="user",
-                    content=[TextBlock(type="text", text=compressed_summary)],
-                    metadata={"has_compressed_summary": "true"},
-                )
-                dump_messages.append(summary_msg)
-
-            dump_messages.extend(messages)
-
-            with open(history_file, "w", encoding="utf-8") as f:
-                for msg in dump_messages:
-                    f.write(
-                        json.dumps(msg.to_dict(), ensure_ascii=False) + "\n",
-                    )
-
-            logger.info(
-                f"Dumped {len(dump_messages)} messages to {history_file}",
-            )
-            return await self._make_system_msg(
-                f"**History Dumped!**\n\n"
-                f"- Messages saved: {len(dump_messages)}\n"
-                f"- Has summary: {has_summary}\n"
-                f"- File: `{history_file}`",
-            )
-        except Exception as e:
-            logger.exception(f"Failed to dump history: {e}")
-            return await self._make_system_msg(
-                f"**Dump Failed**\n\n" f"- Error: {e}",
-            )
-
-    async def _process_load_history(
+    async def _process_proactive(
         self,
         _messages: list[Msg],
-        _args: str = "",
+        args: str = "",
     ) -> Msg:
-        """Process /load_history command to load messages from a JSONL file.
+        """Process /proactive command to manage proactive conversation feature.
 
         Args:
-            _messages: List of messages in memory (unused)
-            _args: Command arguments (unused)
+            _messages: List of messages in memory (not used for this command)
+            args: Command arguments ('on', 'off', 'status', or minutes value)
 
         Returns:
-            System message with load result
+            System message with the result of the proactive command
         """
-        agent_config = self._get_agent_config()
-        history_file = Path(agent_config.workspace_dir) / DEBUG_HISTORY_FILE
+        args = args.strip().lower()
 
-        if not history_file.exists():
-            return await self._make_system_msg(
-                f"**Load Failed**\n\n"
-                f"- File not found: `{history_file}`\n"
-                f"- Use /dump_history first to create the file",
-            )
+        if not args or args == "on":
+            # Enable with default 30 minutes if no argument or 'on' is specified
+            try:
+                result = enable_proactive_for_session(
+                    self.agent_name,
+                    30,
+                    memory_manager=self.memory_manager,
+                    in_memory=self.memory
+                )
+                update_last_interaction_time(self.agent_name)  # Reset the timer when enabled
+                return await self._make_system_msg(
+                    f"**Proactive Mode Enabled**\n\n"
+                    f"- Idle time: 30 minutes\n"
+                    f"- Status: {result}\n"
+                    f"- Proactive messages will be sent after 30 minutes of inactivity"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    f"**Error Enabling Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
 
-        try:
-            loaded_messages: list[Msg] = []
-            has_summary_marker = False
-            with open(history_file, encoding="utf-8") as f:
-                for i, line in enumerate(f):
-                    line = line.strip()
-                    if line:
-                        msg_dict = json.loads(line)
-                        msg = Msg.from_dict(msg_dict)
-                        loaded_messages.append(msg)
-                        # Check first message for summary marker
-                        if (
-                            i == 0
-                            and msg.metadata.get("has_compressed_summary")
-                            == "true"
-                        ):
-                            has_summary_marker = True
-                        if len(loaded_messages) >= MAX_LOAD_HISTORY_COUNT:
-                            break
+        elif args == "off":
+            # Disable proactive mode
+            try:
+                reset_proactive_session(self.agent_name)
+                return await self._make_system_msg(
+                    f"**Proactive Mode Disabled**\n\n"
+                    f"- Proactive monitoring has been stopped\n"
+                    f"- No more proactive messages will be sent"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    f"**Error Disabling Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
 
-            # Clear existing memory
-            self.memory.content.clear()
-            self.memory.clear_compressed_summary()
+        elif args == "status":
+            # Show current proactive status
+            try:
+                config = get_proactive_config(self.agent_name)
+                if config and config.enabled:
+                    status = "ENABLED"
+                    idle_time = config.idle_minutes
+                    last_interaction = config.last_user_interaction.strftime("%Y-%m-%d %H:%M:%S") if config.last_user_interaction else "UNKNOWN"
+                    last_proactive = config.last_proactive_sent.strftime("%Y-%m-%d %H:%M:%S") if config.last_proactive_sent else "NEVER"
+                    return await self._make_system_msg(
+                        f"**Proactive Mode Status**\n\n"
+                        f"- Status: {status}\n"
+                        f"- Idle Time: {idle_time} minutes\n"
+                        f"- Last Interaction: {last_interaction}\n"
+                        f"- Last Proactive Sent: {last_proactive}"
+                    )
+                else:
+                    return await self._make_system_msg(
+                        f"**Proactive Mode Status**\n\n"
+                        f"- Status: DISABLED\n"
+                        f"- Proactive monitoring is not active"
+                    )
+            except Exception as e:
+                return await self._make_system_msg(
+                    f"**Error Checking Proactive Status**\n\n"
+                    f"- Error: {str(e)}"
+                )
 
-            # If first message has summary marker, extract and restore summary
-            if has_summary_marker and loaded_messages:
-                summary_msg = loaded_messages.pop(0)
-                # Extract summary content from the message
-                summary_content = summary_msg.get_text_content() or ""
-                # Set the compressed summary directly
-                await self.memory.update_compressed_summary(summary_content)
-                logger.info("Restored compressed summary from history file")
+        else:
+            # Custom idle time in minutes
+            try:
+                minutes = int(args)
+                if minutes <= 0:
+                    return await self._make_system_msg(
+                        f"**Invalid Minutes Value**\n\n"
+                        f"- Value must be a positive integer\n"
+                        f"- Example: /proactive 45 (for 45 minutes)"
+                    )
 
-            for msg in loaded_messages:
-                await self.memory.add(msg)
-
-            logger.info(
-                f"Loaded {len(loaded_messages)} messages from {history_file}",
-            )
-            return await self._make_system_msg(
-                f"**History Loaded!**\n\n"
-                f"- Messages loaded: {len(loaded_messages)}\n"
-                f"- Has summary: {has_summary_marker}\n"
-                f"- File: `{history_file}`\n"
-                f"- Memory cleared before loading",
-            )
-        except Exception as e:
-            logger.exception(f"Failed to load history: {e}")
-            return await self._make_system_msg(
-                f"**Load Failed**\n\n" f"- Error: {e}",
-            )
+                result = enable_proactive_for_session(
+                    self.agent_name,
+                    minutes,
+                    memory_manager=self.memory_manager,
+                    in_memory=self.memory
+                )
+                update_last_interaction_time(self.agent_name)  # Reset the timer when enabled
+                return await self._make_system_msg(
+                    f"**Proactive Mode Enabled**\n\n"
+                    f"- Idle time: {minutes} minutes\n"
+                    f"- Status: {result}\n"
+                    f"- Proactive messages will be sent after {minutes} minutes of inactivity"
+                )
+            except ValueError:
+                return await self._make_system_msg(
+                    f"**Invalid Command Format**\n\n"
+                    f"- Usage: /proactive [minutes|on|off|status]\n"
+                    f"- Examples:\n"
+                    f"  • /proactive (default 30 minutes)\n"
+                    f"  • /proactive 45 (45 minutes idle time)\n"
+                    f"  • /proactive on (default 30 minutes)\n"
+                    f"  • /proactive off (disable proactive mode)\n"
+                    f"  • /proactive status (show current status)"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    f"**Error Configuring Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
 
     async def handle_conversation_command(self, query: str) -> Msg:
         """Process conversation system commands.
