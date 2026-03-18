@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """Responder logic for proactive conversation feature."""
 
-import asyncio
 import logging
 from datetime import datetime
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+from typing import Optional, List, Dict, TYPE_CHECKING
 from agentscope.message import Msg
 
 
@@ -50,66 +49,62 @@ async def generate_proactive_response(
     Returns:
         A proactive message if successful, None otherwise
     """
-    try:
-        baseline_timestamp = datetime.now()
+    baseline_timestamp = datetime.now()
 
-        # Get session context
-        session_context = await _get_session_context(session_id, in_memory=in_memory)
+    # Get session context
+    session_context = await _get_session_context(session_id, in_memory=in_memory)
 
-        # Read recent file-based memories (last 2 days)
-        file_memory_contents = await _get_recent_file_memories(WORKING_DIR)
+    # Read recent file-based memories (last 2 days)
+    file_memory_contents = await _get_recent_file_memories(WORKING_DIR)
 
-        # Combine and build memory context
-        memory_context_str = build_proactive_memory_context(
-            session_context=session_context,
-            file_memories=file_memory_contents
+    # Combine and build memory context
+    memory_context_str = build_proactive_memory_context(
+        session_context=session_context,
+        file_memories=file_memory_contents
+    )
+
+    # Check for interruption
+    if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
+        logger.info("Proactive response generation interrupted")
+        return None
+
+    # Extract tasks and queries from memory context
+    tasks = await _extract_tasks_from_memory(memory_context_str)
+
+    # Check for interruption again
+    if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
+        logger.info("Proactive response generation interrupted")
+        return None
+
+    # Execute highest priority queries
+    results = []
+    for task in tasks[:3]:  # Limit to top 3 tasks
+        if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
+            logger.info("Proactive response generation interrupted")
+            return None
+
+        result = await _execute_query(task.query)
+        results.append(result)
+
+        # If we got useful information, stop and use it
+        if result.success and result.data:
+            break
+
+    # Generate final proactive message
+    if results and any(r.success for r in results):
+        message_content = await _generate_final_message(
+            memory_context_str,
+            results
         )
 
-        # Check for interruption
-        if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
-            logger.info("Proactive response generation interrupted")
-            return None
-
-        # Extract tasks and queries from memory context
-        tasks = await _extract_tasks_from_memory(memory_context_str)
-
-        # Check for interruption again
-        if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
-            logger.info("Proactive response generation interrupted")
-            return None
-
-        # Execute highest priority queries
-        results = []
-        for task in tasks[:3]:  # Limit to top 3 tasks
-            if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
-                logger.info("Proactive response generation interrupted")
-                return None
-
-            result = await _execute_query(task.query)
-            results.append(result)
-
-            # If we got useful information, stop and use it
-            if result.success and result.data:
-                break
-
-        # Generate final proactive message
-        if results and any(r.success for r in results):
-            message_content = await _generate_final_message(
-                memory_context_str,
-                results
+        if message_content:
+            # Create a message with proactive indicator in metadata
+            return Msg(
+                name="Friday",
+                role="assistant",
+                content=message_content,
+                metadata={"is_proactive": True, "timestamp": datetime.now()}
             )
-
-            if message_content:
-                # Create a message with proactive indicator in metadata
-                return Msg(
-                    name="Friday",
-                    role="assistant",
-                    content=message_content,
-                    metadata={"is_proactive": True, "timestamp": datetime.now()}
-                )
-
-    except Exception as e:
-        logger.error(f"Error generating proactive response: {e}")
 
     return None
 
@@ -190,43 +185,53 @@ async def _get_recent_file_memories(working_dir: str) -> List[str]:
 async def _extract_tasks_from_memory(memory_context: str) -> List[ProactiveTask]:
     """Extract likely user tasks from memory context."""
     from ..react_agent import CoPawAgent
+    from ...config.config import AgentProfileConfig, AgentsRunningConfig
 
-    try:
-        temp_agent = CoPawAgent(max_iters=10)
-        temp_agent._sys_prompt = PROACTIVE_TASK_EXTRACTION_PROMPT + f"\n\nMemory:\n{memory_context}"
-        temp_agent.name = "ProactiveTaskExtractor"
-        response = await temp_agent(Msg(
-            name="User",
-            role="user",
-            content=f"Extract tasks from this memory context:\n{memory_context}"
-        ))
+    # Create minimal required config for the agent
+    agent_config = AgentProfileConfig(
+        id="proactive-task-extractor",
+        name="ProactiveTaskExtractor",
+        running=AgentsRunningConfig(
+            max_iters=5,
+            max_input_length=40000,
+            enable_tool_result_compact=True,
+            tool_result_compact_keep_n=5
+        ),
+        language="en"
+    )
 
-        logger.info(f"Proactive task extraction response: {response}")
-        if not response or not response.content:
-            return []
+    temp_agent = CoPawAgent(agent_config=agent_config)
+    temp_agent._sys_prompt = PROACTIVE_TASK_EXTRACTION_PROMPT + f"\n\nMemory:\n{memory_context}"
+    temp_agent.name = "ProactiveTaskExtractor"
+    response = await temp_agent(Msg(
+        name="User",
+        role="user",
+        content=f"Extract tasks from this memory context:\n{memory_context}"
+    ))
 
-        # Handle both string and structured content formats
-        text_content = _extract_content(response.content)
+    logger.info(f"Proactive task extraction response: {response}")
+    if not response or not response.content:
+        return []
 
-        # Try to parse JSON directly
-        parsed_data = load_json_safely(text_content)
+    # Handle both string and structured content formats
+    text_content = _extract_content(response.content)
+
+    # Try to parse JSON directly
+    parsed_data = load_json_safely(text_content)
+
+    if parsed_data and "tasks" in parsed_data:
+        return _create_tasks_from_data(parsed_data["tasks"])
+
+    # If direct parsing fails, try regex extraction
+    import re
+    json_match = re.search(r'\{.*\}', text_content, re.DOTALL)
+
+    if json_match:
+        json_str = json_match.group(0)
+        parsed_data = load_json_safely(json_str)
 
         if parsed_data and "tasks" in parsed_data:
             return _create_tasks_from_data(parsed_data["tasks"])
-
-        # If direct parsing fails, try regex extraction
-        import re
-        json_match = re.search(r'\{.*\}', text_content, re.DOTALL)
-
-        if json_match:
-            json_str = json_match.group(0)
-            parsed_data = load_json_safely(json_str)
-
-            if parsed_data and "tasks" in parsed_data:
-                return _create_tasks_from_data(parsed_data["tasks"])
-
-    except Exception as e:
-        logger.error(f"Error extracting tasks from memory: {e}")
 
     return []
 
@@ -247,38 +252,48 @@ def _create_tasks_from_data(tasks_data: List[Dict]) -> List[ProactiveTask]:
 
 async def _execute_query(query: str) -> ProactiveQueryResult:
     """Execute a query using available tools."""
-    try:
-        from agentscope.tool import Toolkit
-        from ..react_agent import CoPawAgent
+    from agentscope.tool import Toolkit
+    from ..react_agent import CoPawAgent
+    from ...config.config import AgentProfileConfig, AgentsRunningConfig
 
-        toolkit = Toolkit()
-        toolkit.register_tool_function(browser_use)
-        toolkit.register_tool_function(read_file)
-        toolkit.register_tool_function(execute_shell_command)
+    toolkit = Toolkit()
+    toolkit.register_tool_function(browser_use)
+    toolkit.register_tool_function(read_file)
+    toolkit.register_tool_function(execute_shell_command)
 
-        query_agent = CoPawAgent(max_iters=10)
-        query_agent._sys_prompt = f"You are a helpful assistant. Execute this query: {query}"
-        query_agent.name = "ProactiveQueryAgent"
-        query_agent.toolkit = toolkit
+    # Create minimal required config for the agent
+    agent_config = AgentProfileConfig(
+        id="proactive-query-agent",
+        name="ProactiveQueryAgent",
+        running=AgentsRunningConfig(
+            max_iters=5,
+            max_input_length=40000,
+            enable_tool_result_compact=True,
+            tool_result_compact_keep_n=5
+        ),
+        language="en"
+    )
 
-        response = await query_agent(Msg(
-            name="User",
-            role="user",
-            content=query
-        ))
+    query_agent = CoPawAgent(agent_config=agent_config)
+    query_agent._sys_prompt = f"You are a helpful assistant. Execute this query: {query}"
+    query_agent.name = "ProactiveQueryAgent"
+    # Replace the toolkit with the one we created
+    query_agent.toolkit = toolkit
+    # Update the memory to reflect the new toolkit
+    if query_agent.memory_manager is not None:
+        query_agent.memory = query_agent.memory_manager.get_in_memory_memory()
 
-        return ProactiveQueryResult(
-            query=query,
-            success=True,
-            data=response.content if response else None
-        )
-    except Exception as e:
-        logger.error(f"Error executing query '{query}': {e}")
-        return ProactiveQueryResult(
-            query=query,
-            success=False,
-            error=str(e)
-        )
+    response = await query_agent(Msg(
+        name="User",
+        role="user",
+        content=query
+    ))
+
+    return ProactiveQueryResult(
+        query=query,
+        success=True,
+        data=response.content if response else None
+    )
 
 
 async def _generate_final_message(
@@ -286,36 +301,46 @@ async def _generate_final_message(
     query_results: List[ProactiveQueryResult]
 ) -> Optional[str]:
     """Generate the final proactive message for the user."""
-    try:
-        # Prepare gathered info from successful queries
-        gathered_info = ""
-        for result in query_results:
-            if result.success and result.data:
-                gathered_info += f"Query: {result.query}\nResult: {result.data}\n\n"
+    # Prepare gathered info from successful queries
+    gathered_info = ""
+    for result in query_results:
+        if result.success and result.data:
+            gathered_info += f"Query: {result.query}\nResult: {result.data}\n\n"
 
-        if not gathered_info.strip():
-            return None
+    if not gathered_info.strip():
+        return None
 
-        from ..react_agent import CoPawAgent
+    from ..react_agent import CoPawAgent
+    from ...config.config import AgentProfileConfig, AgentsRunningConfig
 
-        message_agent = CoPawAgent(max_iters=10)
-        message_agent._sys_prompt = PROACTIVE_USER_FACING_MESSAGE_PROMPT.format(
-            session_context=memory_context,
-            gathered_info=gathered_info
-        )
-        message_agent.name = "ProactiveMessageGenerator"
+    # Create minimal required config for the agent
+    agent_config = AgentProfileConfig(
+        id="proactive-message-generator",
+        name="ProactiveMessageGenerator",
+        running=AgentsRunningConfig(
+            max_iters=5,
+            max_input_length=40000,
+            enable_tool_result_compact=True,
+            tool_result_compact_keep_n=5
+        ),
+        language="en"
+    )
 
-        response = await message_agent(Msg(
-            name="User",
-            role="user",
-            content="Generate a helpful proactive message based on the context and information."
-        ))
+    message_agent = CoPawAgent(agent_config=agent_config)
+    message_agent._sys_prompt = PROACTIVE_USER_FACING_MESSAGE_PROMPT.format(
+        session_context=memory_context,
+        gathered_info=gathered_info
+    )
+    message_agent.name = "ProactiveMessageGenerator"
 
-        if response and response.content:
-            return response.content
+    response = await message_agent(Msg(
+        name="User",
+        role="user",
+        content="Generate a helpful proactive message based on the context and information."
+    ))
 
-    except Exception as e:
-        logger.error(f"Error generating final proactive message: {e}")
+    if response and response.content:
+        return response.content
 
     return None
 
