@@ -22,6 +22,7 @@ class ProactiveConfig:
     last_user_interaction: Optional[datetime] = None
     last_proactive_sent: Optional[datetime] = None
     running_task_id: Optional[str] = None
+    mode_enabled_time: Optional[datetime] = None  # Time when proactive mode was enabled
 
 
 @dataclass

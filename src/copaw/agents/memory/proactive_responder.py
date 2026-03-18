@@ -195,7 +195,6 @@ async def _extract_tasks_from_memory(memory_context: str) -> List[ProactiveTask]
         temp_agent = CoPawAgent(max_iters=10)
         temp_agent._sys_prompt = PROACTIVE_TASK_EXTRACTION_PROMPT + f"\n\nMemory:\n{memory_context}"
         temp_agent.name = "ProactiveTaskExtractor"
-        logger.info(f"Proactive task extraction prompt: {memory_context}")
         response = await temp_agent(Msg(
             name="User",
             role="user",
@@ -255,8 +254,6 @@ async def _execute_query(query: str) -> ProactiveQueryResult:
         toolkit = Toolkit()
         toolkit.register_tool_function(browser_use)
         toolkit.register_tool_function(read_file)
-        toolkit.register_tool_function(write_file)
-        toolkit.register_tool_function(edit_file)
         toolkit.register_tool_function(execute_shell_command)
 
         query_agent = CoPawAgent(max_iters=10)

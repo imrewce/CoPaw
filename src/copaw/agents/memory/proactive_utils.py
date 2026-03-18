@@ -38,8 +38,12 @@ def build_proactive_memory_context(
     max_chars: int = 100000
 ) -> str:
     """Build a combined memory context for proactive agent."""
+
+    # Filter session_context to only keep user messages
+    filtered_session_context = _filter_user_messages_only(session_context)
+
     combined_context = "[SESSION CONTEXT]\n"
-    combined_context += session_context + "\n\n"
+    combined_context += filtered_session_context + "\n\n"
 
     # Add file memories in chronological order (most recent first)
     for i, file_memory in enumerate(file_memories):
@@ -53,7 +57,7 @@ def build_proactive_memory_context(
 
     # Truncate if necessary, prioritizing session context
     if len(combined_context) > max_chars:
-        session_section = "[SESSION CONTEXT]\n" + session_context + "\n\n"
+        session_section = "[SESSION CONTEXT]\n" + filtered_session_context + "\n\n"
         if len(session_section) > max_chars:
             return session_section[:max_chars]
 
@@ -64,6 +68,20 @@ def build_proactive_memory_context(
         combined_context = session_section + file_memories_section
 
     return combined_context
+
+
+def _filter_user_messages_only(session_context: str) -> str:
+    """Filter session context to only include user messages."""
+    lines = session_context.split('\n')
+    filtered_lines = []
+
+    for line in lines:
+        # Check if line contains user message marker
+        # Format is typically like "[ROLE NAME]: content" - we want lines with ROLE containing USER
+        if '[USER ' in line.upper() or '[USER]' in line.upper():
+            filtered_lines.append(line)
+
+    return '\n'.join(filtered_lines)
 
 
 def calculate_elapsed_minutes(timestamp) -> float:
