@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 async def generate_proactive_response(
     session_id: str,
     memory_manager: Optional['MemoryManager'] = None,
-    in_memory: Optional['ReMeInMemoryMemory'] = None
+    in_memory: Optional['ReMeInMemoryMemory'] = None,
+    chat_id: Optional[str] = None
 ) -> Optional[Msg]:
     """Main function to generate proactive response based on memory.
 
@@ -45,6 +46,7 @@ async def generate_proactive_response(
         session_id: The session identifier
         memory_manager: Optional memory manager instance to access real memory
         in_memory: Optional in-memory instance to access session history
+        chat_id: Optional chat UUID for the session (used for proper routing)
 
     Returns:
         A proactive message if successful, None otherwise

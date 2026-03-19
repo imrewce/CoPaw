@@ -30,7 +30,8 @@ def enable_proactive_for_session(
     in_memory: Optional['ReMeInMemoryMemory'] = None,
     channel_manager: Optional[Any] = None,
     channel_id: Optional[str] = None,
-    user_id: Optional[str] = None
+    user_id: Optional[str] = None,
+
 ) -> str:
     """Enable proactive for the given session and start monitoring.
 
@@ -383,6 +384,7 @@ async def send_proactive_message(session_id: str = None, message: Msg = None, se
 
             # Find the most recent active session
             most_recent_session_id, _ = await find_most_recent_active_session()
+            
 
             if most_recent_session_id:
                 session_id = most_recent_session_id
@@ -463,16 +465,12 @@ async def send_proactive_message(session_id: str = None, message: Msg = None, se
             # Use the correct session_id (complete filename like "default_1773649538196") to route to frontend
             await push_store_append(session_id, f"[Proactive] {content_str}")
             logger.info(f"Proactive message pushed to console store for session {session_id}")
-            push_store_success = True
         else:
             logger.warning(f"Session ID or content is empty, cannot send via console push store")
 
     except Exception as e:
         logger.error(f"Failed to send proactive message via console push store: {e}")
         # If console push store fails, we'll try the channel manager as fallback
-
-    # Only use channel manager as fallback if console push store failed
-    if not push_store_success:
         # Use channel manager as fallback if console push store fails
         channel_manager = session_refs.get('channel_manager', None)
 
@@ -499,9 +497,8 @@ async def send_proactive_message(session_id: str = None, message: Msg = None, se
                 logger.error(f"Failed to send proactive message via channel manager: {e}")
                 # Still log the message even if channel send fails
                 logger.info(f"Proactive message content (fallback logging): {content_str}")
-    else:
-        # If push store succeeded, no need to use channel manager
-        logger.info(f"Proactive message sent successfully via console push store, skipping channel manager")
+
+        
 
     # Final fallback - just log the message if nothing else worked
     if not message_stored_in_memory and not push_store_success:
