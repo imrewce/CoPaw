@@ -156,6 +156,45 @@ async def proactive_trigger_loop(session_id: str) -> None:
                                 # Pass the session references if available
                                 session_refs = proactive_sessions.get(session_id, {})
 
+                                # Get access to the global app state to create a proper chat
+                                chat_manager = session_refs.get('chat_manager')
+                                if not chat_manager and 'channel_manager' in session_refs:
+                                    # Try to get the global multi-agent manager to access the chat manager
+                                    try:
+                                        from ...app._app import app
+                                        if hasattr(app.state, 'multi_agent_manager'):
+                                            multi_agent_manager = app.state.multi_agent_manager
+                                            # Try to get the default agent and its chat manager
+                                            if hasattr(multi_agent_manager, 'agents'):
+                                                default_agent = multi_agent_manager.agents.get("default")
+                                                if default_agent and hasattr(default_agent, 'chat_manager'):
+                                                    chat_manager = default_agent.chat_manager
+                                    except Exception:
+                                        chat_manager = None
+
+                                # Create or ensure proactive chat exists for the specific session
+                                if chat_manager:
+                                    try:
+                                        # Use the original session_id to ensure consistency with user's chat
+                                        proactive_chat_id = f"proactive_{session_id}"
+                                        # Check if proactive chat already exists for this session
+                                        proactive_chat = await chat_manager.get_chat(proactive_chat_id)
+                                        if not proactive_chat:
+                                            # Create proactive chat for this session
+                                            from ...app.runner.models import ChatSpec
+                                            proactive_chat = await chat_manager.create_chat(ChatSpec(
+                                                id=proactive_chat_id,
+                                                name="Proactive Message",
+                                                session_id=session_id,  # Use the original session_id
+                                                user_id=session_refs.get('user_id', 'system'),
+                                                channel=session_refs.get('channel_id', 'console'),
+                                                meta={"type": "proactive", "original_session": session_id}
+                                            ))
+                                    except Exception as e:
+                                        logger.warning(f"Could not create proactive chat for session {session_id}: {e}")
+                                        # If creating chat fails, continue anyway
+                                        pass
+
                                 # Create and track the responder task separately from the trigger loop
                                 responder_task = asyncio.create_task(
                                     generate_proactive_response(
@@ -173,8 +212,8 @@ async def proactive_trigger_loop(session_id: str) -> None:
                                     del proactive_responder_tasks[session_id]
 
                                 if proactive_msg:
-                                    # Send the proactive message to the most recent active session
-                                    await send_proactive_message(message=proactive_msg, send_to_most_recent=True)
+                                    # Send the proactive message to the original session, so it appears in the chat list
+                                    await send_proactive_message(session_id=session_id, message=proactive_msg)
                             except asyncio.CancelledError:
                                 logger.info(f"Proactive responder task cancelled for session {session_id}")
                                 # Clean up the responder task reference if it was cancelled
@@ -359,13 +398,15 @@ def ensure_valid_session_id(channel_id: str, sender_id: str, provided_session_id
 # instead of being created by this module
 
 
-async def send_proactive_message(session_id: str = None, message: Msg = None, send_to_most_recent: bool = False) -> None:
-    """Send a proactive message to the session.
+async def send_proactive_message(session_id: str = "proactive_assistant", message: Msg = None) -> Optional[Msg]:
+    """Send a proactive message to the session and return the message.
 
     Args:
-        session_id: Unique identifier for the session (optional if send_to_most_recent=True)
+        session_id: Unique identifier for the session (defaults to proactive_assistant)
         message: The proactive message to send
-        send_to_most_recent: Whether to send to the most recent active session instead of the provided session_id
+
+    Returns:
+        The message that was sent (either original or a new one if conversion was needed)
     """
     # Helper function to safely convert content to string
     def safe_content_str(content):
@@ -376,40 +417,13 @@ async def send_proactive_message(session_id: str = None, message: Msg = None, se
         else:
             return str(content)
 
-    # If we're told to send to the most recent session, find it
-    if send_to_most_recent:
-        try:
-            # Import the function to find the most recent active session
-            from .proactive_utils import find_most_recent_active_session
-
-            # Find the most recent active session
-            most_recent_session_id, _ = await find_most_recent_active_session()
-            
-
-            if most_recent_session_id:
-                session_id = most_recent_session_id
-                logger.info(f"Sending proactive message to most recent active session: {session_id}")
-            else:
-                logger.warning("No recent active session found, creating a proactive session ID")
-                # Create a new proactive session ID if none found
-                import time
-                session_id = f"proactive_{int(time.time())}"
-                logger.info(f"Created proactive session ID: {session_id}")
-        except ImportError:
-            logger.warning("Could not import find_most_recent_active_session, creating proactive session ID")
-            # Create a new proactive session ID if import fails
-            import time
-            session_id = f"proactive_{int(time.time())}"
-            logger.info(f"Created proactive session ID: {session_id}")
-
-    # If still no session_id, return
+    # If no session_id provided, default to proactive_assistant
     if not session_id:
-        logger.error("No session_id available to send proactive message to")
-        return
+        session_id = "proactive_assistant"
 
     # Get session references (memory_manager, in_memory, etc.) based on session_id
     session_refs = proactive_sessions.get(session_id, {})
-    in_memory = session_refs.get('in_memory')
+    # in_memory = session_refs.get('in_memory')  # Not used in this function
 
     # Extract channel and user info from session_id if it follows the format "channel:user_id"
     # or from session_refs if available
@@ -430,39 +444,26 @@ async def send_proactive_message(session_id: str = None, message: Msg = None, se
         if not user_id:
             user_id = "proactive_system"
 
-    # Store the message in session memory if available
-    message_stored_in_memory = False
-    if in_memory:
-        try:
-            # Actually store the message in the session memory
-            # Make sure the message has the proactive marker
-            if not hasattr(message, 'metadata') or message.metadata is None:
-                message.metadata = {}
-            message.metadata['is_proactive'] = True
 
-            # Add timestamp if not present
-            if not hasattr(message, 'timestamp') or message.timestamp is None:
-                from datetime import datetime
-                message.timestamp = datetime.now().isoformat()
+    # If message is provided and has content, use it
+    if message and message.content:
+        content_str = safe_content_str(message.content)
+    else:
+        # Create a default message if none provided
+        content_str = "Proactive message content"
+        message = Msg(
+            name="Friday",
+            role="assistant",
+            content=content_str,
+            metadata={"is_proactive": True, "timestamp": datetime.now()}
+        )
 
-            content_str = safe_content_str(message.content)
-            await in_memory.add([message])
-            message_stored_in_memory = True
-            logger.info(f"Proactive message stored in memory for session {session_id}: {content_str[:100]}...")
-        except Exception as e:
-            logger.error(f"Failed to store proactive message in memory for session {session_id}: {e}")
 
-    # Prepare content string for all delivery methods
-    content_str = safe_content_str(message.content)
-
-    # First, send to the console push store as the primary method
-    push_store_success = False
     try:
         # Import the console push store to add the message
         from ...app.console_push_store import append as push_store_append
 
         if session_id and content_str.strip():
-            # Use the correct session_id (complete filename like "default_1773649538196") to route to frontend
             await push_store_append(session_id, f"[Proactive] {content_str}")
             logger.info(f"Proactive message pushed to console store for session {session_id}")
         else:
@@ -477,14 +478,27 @@ async def send_proactive_message(session_id: str = None, message: Msg = None, se
         # Try to access channel manager from globals if available
         if not channel_manager:
             try:
-                from ...app import get_global_channel_manager
-                channel_manager = get_global_channel_manager()
-            except ImportError:
+                # Since we're outside the request context, we need to get the
+                # global multi-agent manager to access channel managers
+                # Look for it in a common application state location
+                from ...app._app import app
+                if hasattr(app.state, 'multi_agent_manager'):
+                    multi_agent_manager = app.state.multi_agent_manager
+                    # In this context we can't use async/await, so we'll try to access
+                    # the default agent's channel manager if it exists
+                    if hasattr(multi_agent_manager, 'agents'):
+                        # Look for default agent in loaded agents
+                        default_agent = multi_agent_manager.agents.get("default")
+                        if default_agent and hasattr(default_agent, 'channel_manager'):
+                            channel_manager = default_agent.channel_manager
+
+            except Exception:
                 channel_manager = None
 
         # If we have a channel manager, send the message through the appropriate channel
         if channel_manager and channel_id and user_id:
             try:
+                # Convert the message to a format suitable for the channel manager
                 await channel_manager.send_text(
                     channel=channel_id,
                     user_id=user_id,
@@ -498,11 +512,11 @@ async def send_proactive_message(session_id: str = None, message: Msg = None, se
                 # Still log the message even if channel send fails
                 logger.info(f"Proactive message content (fallback logging): {content_str}")
 
+    # Return the message object that was processed
+    return message
+
         
 
-    # Final fallback - just log the message if nothing else worked
-    if not message_stored_in_memory and not push_store_success:
-        logger.info(f"Proactive message (not delivered): {content_str}")
 
 
 def get_proactive_config(session_id: str) -> Optional[ProactiveConfig]:

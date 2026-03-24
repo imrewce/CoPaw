@@ -84,9 +84,6 @@ async def find_most_recent_active_session() -> Tuple[Optional[str], Optional[dat
     session_ids_from_chats = []
     try:
         session_ids_from_chats = await get_all_session_ids_from_chats_file()
-        print("#########################################################")
-        print(session_ids_from_chats)
-        print("#########################################################")
     except Exception:
         # If primary method fails, try manual parsing
         from ...constant import WORKING_DIR
@@ -149,6 +146,7 @@ async def find_most_recent_active_session() -> Tuple[Optional[str], Optional[dat
 def get_recent_memory_file_paths(working_dir: str, num_days: int = 2) -> List[str]:
     """Get paths to the most recent memory files from the working directory."""
     memory_dir = os.path.join(working_dir, "memory")
+
     if not os.path.exists(memory_dir):
         return []
 

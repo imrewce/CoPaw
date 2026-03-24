@@ -29,7 +29,7 @@ from ..tools import (
     read_file,
     execute_shell_command
 )
-from copaw.constant import WORKING_DIR
+
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,8 @@ async def generate_proactive_response(
     session_id: str,
     memory_manager: Optional['MemoryManager'] = None,
     in_memory: Optional['ReMeInMemoryMemory'] = None,
-    chat_id: Optional[str] = None
 ) -> Optional[Msg]:
+    from ...app.multi_agent_manager import MultiAgentManager
     """Main function to generate proactive response based on memory.
 
     Args:
@@ -57,13 +57,16 @@ async def generate_proactive_response(
     session_context = await _get_session_context(session_id, in_memory=in_memory)
 
     # Read recent file-based memories (last 2 days)
-    file_memory_contents = await _get_recent_file_memories(WORKING_DIR)
+    multi_agent_manager = MultiAgentManager()
+    workspace = await multi_agent_manager.get_agent("default")
+    file_memory_contents = await _get_recent_file_memories(workspace.workspace_dir)
 
     # Combine and build memory context
     memory_context_str = build_proactive_memory_context(
         session_context=session_context,
         file_memories=file_memory_contents
     )
+
 
     # Check for interruption
     if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
@@ -95,7 +98,6 @@ async def generate_proactive_response(
     # Generate final proactive message
     if results and any(r.success for r in results):
         message_content = await _generate_final_message(
-            memory_context_str,
             results
         )
 
@@ -184,34 +186,101 @@ async def _get_recent_file_memories(working_dir: str) -> List[str]:
     return memories
 
 
-async def _extract_tasks_from_memory(memory_context: str) -> List[ProactiveTask]:
-    """Extract likely user tasks from memory context."""
-    from ..react_agent import CoPawAgent
-    from ...config.config import AgentProfileConfig, AgentsRunningConfig
 
-    # Create minimal required config for the agent
-    agent_config = AgentProfileConfig(
-        id="proactive-task-extractor",
-        name="ProactiveTaskExtractor",
-        running=AgentsRunningConfig(
-            max_iters=5,
-            max_input_length=40000,
-            enable_tool_result_compact=True,
-            tool_result_compact_keep_n=5
-        ),
-        language="en"
+async def _initialize_proactive_agent(session_id: str = "proactive_main_session"):
+    """Helper function to initialize a proactive agent with proper configuration."""
+    from ..react_agent import CoPawAgent
+    from ...config.config import load_agent_config
+    from ...app.runner.utils import build_env_context
+    from ...app.runner.models import ChatSpec
+    from agentscope.tool import Toolkit
+    from ...app.multi_agent_manager import MultiAgentManager
+
+    # Get the workspace for the default agent
+    multi_agent_manager = MultiAgentManager()
+    workspace = await multi_agent_manager.get_agent("default")
+
+    # Create and register chat for proactive main session
+    chat_spec = ChatSpec(
+        id="proactive_main_session",
+        name="Proactive Main Session",
+        session_id="proactive_main_session",
+        user_id="proactive_system",
+        channel="console",
+        meta={"type": "proactive", "agent_id": "default"}
     )
 
-    temp_agent = CoPawAgent(agent_config=agent_config)
-    temp_agent._sys_prompt = PROACTIVE_TASK_EXTRACTION_PROMPT + f"\n\nMemory:\n{memory_context}"
-    temp_agent.name = "ProactiveTaskExtractor"
-    response = await temp_agent(Msg(
+    if workspace.chat_manager:
+        # Check if chat already exists, create if not
+        chat = await workspace.chat_manager.get_chat("proactive_main_session")
+        if not chat:
+            chat = await workspace.chat_manager.create_chat(chat_spec)
+
+    # Load agent configuration
+    agent_config = load_agent_config("default")
+
+    # Create environment context
+    env_context = build_env_context(
+        session_id=session_id,
+        user_id="proactive_system",
+        channel="console",
+        working_dir=str(workspace.workspace_dir)
+    )
+
+    # Create agent with proper configuration and context
+    agent = CoPawAgent(
+        agent_config=agent_config,
+        env_context=env_context,
+        mcp_clients=await workspace.mcp_manager.get_clients() if workspace.mcp_manager else [],
+        memory_manager=workspace.memory_manager,
+        request_context={
+            "session_id": session_id,
+            "user_id": "proactive_system",
+            "channel": "console",
+            "agent_id": "default"
+        },
+        workspace_dir=workspace.workspace_dir
+    )
+
+    # Complete agent setup
+    await agent.register_mcp_clients()
+    toolkit = Toolkit()
+    toolkit.register_tool_function(browser_use)
+    toolkit.register_tool_function(read_file)
+    toolkit.register_tool_function(execute_shell_command)
+ 
+    # Load session state if it exists
+    try:
+        await workspace.runner.session.load_session_state(
+            session_id=session_id,
+            user_id="proactive_system",
+            agent=agent
+        )
+    except KeyError:
+        pass
+    
+    agent.toolkit = toolkit
+    # Update the memory to reflect the new toolkit
+    if agent.memory_manager is not None:
+        agent.memory = agent.memory_manager.get_in_memory_memory()
+
+    return agent, workspace
+
+
+async def _extract_tasks_from_memory(memory_context: str) -> List[ProactiveTask]:
+    """Extract likely user tasks from memory context."""
+    # Initialize the agent using the helper function
+    temp_agent, workspace = await _initialize_proactive_agent()
+
+
+
+    # Process the memory context to extract tasks
+    response = await temp_agent.reply(Msg(
         name="User",
         role="user",
-        content=f"Extract tasks from this memory context:\n{memory_context}"
+        content=f"{PROACTIVE_TASK_EXTRACTION_PROMPT}\n #Memories: {memory_context}"
     ))
 
-    logger.info(f"Proactive task extraction response: {response}")
     if not response or not response.content:
         return []
 
@@ -251,44 +320,17 @@ def _create_tasks_from_data(tasks_data: List[Dict]) -> List[ProactiveTask]:
             ))
     return tasks
 
-
 async def _execute_query(query: str) -> ProactiveQueryResult:
     """Execute a query using available tools."""
-    from agentscope.tool import Toolkit
-    from ..react_agent import CoPawAgent
-    from ...config.config import AgentProfileConfig, AgentsRunningConfig
 
-    toolkit = Toolkit()
-    toolkit.register_tool_function(browser_use)
-    toolkit.register_tool_function(read_file)
-    toolkit.register_tool_function(execute_shell_command)
+    query_agent, workspace = await _initialize_proactive_agent()
+    query_agent.set_console_output_enabled(enabled=True)
 
-    # Create minimal required config for the agent
-    agent_config = AgentProfileConfig(
-        id="proactive-query-agent",
-        name="ProactiveQueryAgent",
-        running=AgentsRunningConfig(
-            max_iters=5,
-            max_input_length=40000,
-            enable_tool_result_compact=True,
-            tool_result_compact_keep_n=5
-        ),
-        language="en"
-    )
 
-    query_agent = CoPawAgent(agent_config=agent_config)
-    query_agent._sys_prompt = f"You are a helpful assistant. Execute this query: {query}"
-    query_agent.name = "ProactiveQueryAgent"
-    # Replace the toolkit with the one we created
-    query_agent.toolkit = toolkit
-    # Update the memory to reflect the new toolkit
-    if query_agent.memory_manager is not None:
-        query_agent.memory = query_agent.memory_manager.get_in_memory_memory()
-
-    response = await query_agent(Msg(
+    response = await query_agent.reply(Msg(
         name="User",
         role="user",
-        content=query
+        content=f"Use only browser_use, or execute_shell_command/ read_file (if really necessary) tools to answer this query: {query}"
     ))
 
     return ProactiveQueryResult(
@@ -299,7 +341,6 @@ async def _execute_query(query: str) -> ProactiveQueryResult:
 
 
 async def _generate_final_message(
-    memory_context: str,
     query_results: List[ProactiveQueryResult]
 ) -> Optional[str]:
     """Generate the final proactive message for the user."""
@@ -312,33 +353,18 @@ async def _generate_final_message(
     if not gathered_info.strip():
         return None
 
-    from ..react_agent import CoPawAgent
-    from ...config.config import AgentProfileConfig, AgentsRunningConfig
+    # Initialize the agent using the helper function
+    message_agent, workspace = await _initialize_proactive_agent()
 
-    # Create minimal required config for the agent
-    agent_config = AgentProfileConfig(
-        id="proactive-message-generator",
-        name="ProactiveMessageGenerator",
-        running=AgentsRunningConfig(
-            max_iters=5,
-            max_input_length=40000,
-            enable_tool_result_compact=True,
-            tool_result_compact_keep_n=5
-        ),
-        language="en"
-    )
+    # Enable console output so users can see the final message
+    message_agent.set_console_output_enabled(enabled=True)
 
-    message_agent = CoPawAgent(agent_config=agent_config)
-    message_agent._sys_prompt = PROACTIVE_USER_FACING_MESSAGE_PROMPT.format(
-        session_context=memory_context,
-        gathered_info=gathered_info
-    )
-    message_agent.name = "ProactiveMessageGenerator"
-
-    response = await message_agent(Msg(
+    response = await message_agent.reply(Msg(
         name="User",
         role="user",
-        content="Generate a helpful proactive message based on the context and information."
+        content=PROACTIVE_USER_FACING_MESSAGE_PROMPT.format(
+        gathered_info=gathered_info
+    )
     ))
 
     if response and response.content:
