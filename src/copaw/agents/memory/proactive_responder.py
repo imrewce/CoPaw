@@ -8,7 +8,6 @@ from agentscope.message import Msg
 
 
 if TYPE_CHECKING:
-    from ..memory import MemoryManager
     from reme.memory.file_based import ReMeInMemoryMemory
 
 from .proactive_types import (
@@ -20,9 +19,9 @@ from .proactive_prompts import (
     PROACTIVE_USER_FACING_MESSAGE_PROMPT
 )
 from .proactive_utils import (
-    get_recent_memory_file_paths,
     build_proactive_memory_context,
-    load_json_safely
+    load_json_safely,
+    extract_content
 )
 from ..tools import (
     browser_use,
@@ -36,35 +35,37 @@ logger = logging.getLogger(__name__)
 
 async def generate_proactive_response(
     session_id: str,
-    memory_manager: Optional['MemoryManager'] = None,
     in_memory: Optional['ReMeInMemoryMemory'] = None,
 ) -> Optional[Msg]:
     from ...app.multi_agent_manager import MultiAgentManager
+    from ...app.agent_context import get_current_agent_id
+
     """Main function to generate proactive response based on memory.
 
     Args:
         session_id: The session identifier
         memory_manager: Optional memory manager instance to access real memory
         in_memory: Optional in-memory instance to access session history
-        chat_id: Optional chat UUID for the session (used for proper routing)
 
     Returns:
         A proactive message if successful, None otherwise
     """
     baseline_timestamp = datetime.now()
 
-    # Get session context
-    session_context = await _get_session_context(session_id, in_memory=in_memory)
+    # Get the current active agent ID
+    active_agent_id = get_current_agent_id()
 
-    # Read recent file-based memories (last 2 days)
+    # Get the workspace for the active agent
     multi_agent_manager = MultiAgentManager()
-    workspace = await multi_agent_manager.get_agent("default")
-    file_memory_contents = await _get_recent_file_memories(workspace.workspace_dir)
+    workspace = await multi_agent_manager.get_agent(active_agent_id)
+
+    # Create a single agent instance for all operations
+    agent = await _initialize_single_proactive_agent(session_id, workspace, active_agent_id)
+
 
     # Combine and build memory context
     memory_context_str = build_proactive_memory_context(
-        session_context=session_context,
-        file_memories=file_memory_contents
+        agent_workspace_path=str(workspace.workspace_dir)
     )
 
 
@@ -73,151 +74,55 @@ async def generate_proactive_response(
         logger.info("Proactive response generation interrupted")
         return None
 
-    # Extract tasks and queries from memory context
-    tasks = await _extract_tasks_from_memory(memory_context_str)
+    # Extract tasks and queries from memory context using the single agent
+    tasks = await _extract_tasks_from_memory(memory_context_str, agent)
 
     # Check for interruption again
     if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
         logger.info("Proactive response generation interrupted")
         return None
 
-    # Execute highest priority queries
+    # Execute highest priority queries using the single agent
     results = []
     for task in tasks[:3]:  # Limit to top 3 tasks
         if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
             logger.info("Proactive response generation interrupted")
             return None
 
-        result = await _execute_query(task.query)
+        result = await _execute_query(task.query, agent)
         results.append(result)
 
         # If we got useful information, stop and use it
         if result.success and result.data:
             break
+    
+    if await _was_interrupted(baseline_timestamp, in_memory=in_memory):
+        logger.info("Proactive response generation interrupted")
+        return None
 
-    # Generate final proactive message
-    if results and any(r.success for r in results):
+    # Generate final proactive message using the single agent
+    if results:
         message_content = await _generate_final_message(
-            results
+            results[-1], agent
         )
 
-        if message_content:
-            # Create a message with proactive indicator in metadata
-            return Msg(
-                name="Friday",
-                role="assistant",
-                content=message_content,
-                metadata={"is_proactive": True, "timestamp": datetime.now()}
-            )
 
     return None
 
 
-async def _get_session_context(session_id: str, in_memory: Optional['ReMeInMemoryMemory'] = None) -> str:
-    """Get the current session context."""
-    if not in_memory:
-        return f"Session context for {session_id}. This would normally include recent conversation history and state."
 
-    try:
-        messages = await in_memory.get_memory(
-            exclude_mark=None,
-            prepend_summary=False,
-        )
-
-        if not messages:
-            return f"No conversation history found for session {session_id}."
-
-        context_parts = []
-        for msg in messages:
-            sender = getattr(msg, 'name', 'Unknown')
-            role = getattr(msg, 'role', 'unknown')
-
-            # Extract content regardless of format
-            content = _extract_content(msg.content)
-            context_parts.append(f"[{role.upper()} {sender}]: {content}")
-
-        return "\n".join(context_parts)
-
-    except Exception as e:
-        logger.warning(f"Could not access real session memory: {e}")
-        return f"Session context for {session_id}. Could not access real session memory: {e}"
-
-
-def _extract_content(content) -> str:
-    """Helper to extract string content from various formats."""
-    if isinstance(content, str):
-        return content
-    elif isinstance(content, list):
-        text_parts = []
-        for block in content:
-            if isinstance(block, dict):
-                if 'text' in block:
-                    text_parts.append(block['text'])
-                elif 'content' in block:
-                    text_parts.append(block['content'])
-            elif hasattr(block, 'text'):
-                text_parts.append(getattr(block, 'text', ''))
-            elif hasattr(block, 'content'):
-                text_parts.append(getattr(block, 'content', ''))
-            else:
-                text_parts.append(str(block))
-        return ' '.join(text_parts)
-    elif hasattr(content, 'text'):
-        return getattr(content, 'text', '')
-    elif hasattr(content, 'content'):
-        return getattr(content, 'content', '')
-    else:
-        return str(content)
-
-
-async def _get_recent_file_memories(working_dir: str) -> List[str]:
-    """Get recent file-based memories from the working directory."""
-    file_paths = get_recent_memory_file_paths(working_dir, num_days=2)
-    memories = []
-
-    for file_path in file_paths:
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                memories.append(content)
-        except Exception as e:
-            logger.warning(f"Could not read memory file {file_path}: {e}")
-
-    return memories
-
-
-
-async def _initialize_proactive_agent(session_id: str = "proactive_main_session"):
-    """Helper function to initialize a proactive agent with proper configuration."""
+async def _initialize_single_proactive_agent(session_id: str, workspace, agent_id: str = "proactive"):
+    """Initialize a single proactive agent instance to be used across all operations."""
     from ..react_agent import CoPawAgent
     from ...config.config import load_agent_config
     from ...app.runner.utils import build_env_context
     from ...app.runner.models import ChatSpec
     from agentscope.tool import Toolkit
-    from ...app.multi_agent_manager import MultiAgentManager
 
-    # Get the workspace for the default agent
-    multi_agent_manager = MultiAgentManager()
-    workspace = await multi_agent_manager.get_agent("default")
-
-    # Create and register chat for proactive main session
-    chat_spec = ChatSpec(
-        id="proactive_main_session",
-        name="Proactive Main Session",
-        session_id="proactive_main_session",
-        user_id="proactive_system",
-        channel="console",
-        meta={"type": "proactive", "agent_id": "default"}
-    )
-
-    if workspace.chat_manager:
-        # Check if chat already exists, create if not
-        chat = await workspace.chat_manager.get_chat("proactive_main_session")
-        if not chat:
-            chat = await workspace.chat_manager.create_chat(chat_spec)
 
     # Load agent configuration
-    agent_config = load_agent_config("default")
+    agent_config = load_agent_config(agent_id)
+    agent_config.running.max_iters = 30
 
     # Create environment context
     env_context = build_env_context(
@@ -237,7 +142,7 @@ async def _initialize_proactive_agent(session_id: str = "proactive_main_session"
             "session_id": session_id,
             "user_id": "proactive_system",
             "channel": "console",
-            "agent_id": "default"
+            "agent_id": agent_id
         },
         workspace_dir=workspace.workspace_dir
     )
@@ -248,44 +153,40 @@ async def _initialize_proactive_agent(session_id: str = "proactive_main_session"
     toolkit.register_tool_function(browser_use)
     toolkit.register_tool_function(read_file)
     toolkit.register_tool_function(execute_shell_command)
- 
+
     # Load session state if it exists
     try:
         await workspace.runner.session.load_session_state(
             session_id=session_id,
-            user_id="proactive_system",
+            user_id="default",
             agent=agent
         )
     except KeyError:
         pass
-    
+
     agent.toolkit = toolkit
     # Update the memory to reflect the new toolkit
     if agent.memory_manager is not None:
         agent.memory = agent.memory_manager.get_in_memory_memory()
 
-    return agent, workspace
+    return agent
 
 
-async def _extract_tasks_from_memory(memory_context: str) -> List[ProactiveTask]:
-    """Extract likely user tasks from memory context."""
-    # Initialize the agent using the helper function
-    temp_agent, workspace = await _initialize_proactive_agent()
-
-
+async def _extract_tasks_from_memory(memory_context: str, agent) -> List[ProactiveTask]:
+    """Extract likely user tasks from memory context using the shared agent."""
 
     # Process the memory context to extract tasks
-    response = await temp_agent.reply(Msg(
+    response = await agent.reply(Msg(
         name="User",
         role="user",
-        content=f"{PROACTIVE_TASK_EXTRACTION_PROMPT}\n #Memories: {memory_context}"
+        content=f"{PROACTIVE_TASK_EXTRACTION_PROMPT}\n#Memories: {memory_context}"
     ))
 
     if not response or not response.content:
         return []
 
     # Handle both string and structured content formats
-    text_content = _extract_content(response.content)
+    text_content = extract_content(response.content)
 
     # Try to parse JSON directly
     parsed_data = load_json_safely(text_content)
@@ -320,57 +221,135 @@ def _create_tasks_from_data(tasks_data: List[Dict]) -> List[ProactiveTask]:
             ))
     return tasks
 
-async def _execute_query(query: str) -> ProactiveQueryResult:
-    """Execute a query using available tools."""
+async def _execute_query(query: str, agent) -> ProactiveQueryResult:
+    """Execute a query using available tools with the shared agent."""
+    import re
 
-    query_agent, workspace = await _initialize_proactive_agent()
-    query_agent.set_console_output_enabled(enabled=True)
-
-
-    response = await query_agent.reply(Msg(
+    response = await agent.reply(Msg(
         name="User",
         role="user",
-        content=f"Use only browser_use, or execute_shell_command/ read_file (if really necessary) tools to answer this query: {query}"
+        content = f"""Task: Answer: {query} using tools --
+                    `browser_use` primary, `execute_shell_command`/`read_file` only if essential.
+                    Self-check: Did you retrieve new, query-relevant data?
+                    Output: Query answer and end strictly with `[SUCCESS]` (yes) or `[FAILURE]` (no).
+                    ⚠️ CRITICAL: The flag MUST be the absolute last token. No trailing text."""
     ))
 
-    return ProactiveQueryResult(
-        query=query,
-        success=True,
-        data=response.content if response else None
+    success = False
+    response_content = response.content[0].get('text', '')
+    if response_content:
+        match = re.search(r'\[(SUCCESS|FAILURE)\]\s*$', response_content.strip())
+        if match:
+            success = (match.group(1) == 'SUCCESS')
+
+        return ProactiveQueryResult(
+            query=query,
+            success=success,
+            data=response_content,
     )
 
 
 async def _generate_final_message(
-    query_results: List[ProactiveQueryResult]
+    result: ProactiveQueryResult, agent
 ) -> Optional[str]:
     """Generate the final proactive message for the user."""
     # Prepare gathered info from successful queries
     gathered_info = ""
-    for result in query_results:
-        if result.success and result.data:
-            gathered_info += f"Query: {result.query}\nResult: {result.data}\n\n"
+
+    if result.data:
+        gathered_info += f"Query: {result.query}\nResult: {result.data}\n\n"
 
     if not gathered_info.strip():
         return None
 
-    # Initialize the agent using the helper function
-    message_agent, workspace = await _initialize_proactive_agent()
-
-    # Enable console output so users can see the final message
-    message_agent.set_console_output_enabled(enabled=True)
-
-    response = await message_agent.reply(Msg(
-        name="User",
-        role="user",
-        content=PROACTIVE_USER_FACING_MESSAGE_PROMPT.format(
+    proactive_content = PROACTIVE_USER_FACING_MESSAGE_PROMPT.format(
         gathered_info=gathered_info
     )
-    ))
 
-    if response and response.content:
-        return response.content
+    # Import required modules from agent_context
+    from ...app.agent_context import get_current_agent_id
 
-    return None
+    # Get the current active agent ID
+    active_agent_id = get_current_agent_id()
+
+    # Send the proactive message using async HTTP request instead of subprocess
+    return await send_proactive_message_via_http(
+        active_agent_id=active_agent_id,
+        proactive_content=proactive_content,
+        timeout_seconds=300
+    )
+
+
+async def send_proactive_message_via_http(
+    active_agent_id: str,
+    proactive_content: str,
+    base_url: str = "http://127.0.0.1:8088", # Default CoPaw address
+    timeout_seconds: int = 300,
+) -> str:
+    """
+    Send a proactive message by directly calling the CoPaw API.
+
+    This is non-blocking and safe to use within an async Uvicorn context.
+    """
+    import aiohttp
+    import asyncio
+
+    # Construct request payload similar to what CLI does
+    request_payload = {
+        "session_id": f"proactive:{active_agent_id}:{int(asyncio.get_event_loop().time() * 1000)}", # Simple session ID
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": f"[Agent proactive_helper requesting] {proactive_content}"}],
+            },
+        ],
+    }
+
+    headers = {"X-Agent-Id": active_agent_id}
+
+    timeout_config = aiohttp.ClientTimeout(total=timeout_seconds)
+    clean_base = base_url.rstrip("/")
+    if not clean_base.endswith("/api"):
+        api_base_url = f"{clean_base}/api"
+    else:
+        api_base_url = clean_base
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{api_base_url.rstrip('/')}/agent/process"
+            async with session.post(
+                url,
+                json=request_payload,
+                headers=headers,
+                timeout=timeout_config
+            ) as resp:
+                resp.raise_for_status()
+
+                # Handle stream response (SSE) - get the last data event
+                last_data = None
+                async for line_bytes in resp.content:
+                    line = line_bytes.decode('utf-8').strip()
+                    if line.startswith("data: "):
+                        try:
+                            last_data = line[6:]  # Remove "data: "
+                        except Exception:
+                            continue
+
+                if last_data:
+                    logger.info("Proactive message sent successfully via direct HTTP call")
+                else:
+                    logger.warning("No valid SSE data received from agent")
+
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout ({timeout_seconds}s) calling CoPaw API for proactive message")
+    except Exception as e:
+        logger.error(f"Error calling CoPaw API for proactive message: {e}")
+
+    # Return the proactive content to ensure the flow continues
+    return proactive_content
+
+
+
 
 
 async def _was_interrupted(baseline_timestamp: datetime, in_memory: Optional['ReMeInMemoryMemory'] = None) -> bool:

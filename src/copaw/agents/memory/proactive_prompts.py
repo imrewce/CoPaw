@@ -2,7 +2,7 @@
 """Prompt templates for proactive conversation feature."""
 
 PROACTIVE_TASK_EXTRACTION_PROMPT = """
-You are given the user's current session memory and recent persistent memory.
+You are given the user's recent session contexts in a reversed order.
 
 Your job:  
 1. Find 1–3 likely high-level goals the user requests (prioritize those mentioned repeatedly or recently).  
@@ -13,8 +13,8 @@ A good goal:
 
 A good query:  
 - Specific, actionable, and tool-friendly (e.g., a search or request).  
-- Addresses missing info the user likely needs *now*.  
-- Avoids duplicating anything already in memory.  
+- Addresses missing info the user likely needs *now*, and queries for the newest information.
+- Avoids duplicating anything already in context, or similar to previous [PROACTIVE] labeled messages. 
 
 Output ONLY a JSON object with this structure:
 {
@@ -29,6 +29,7 @@ Output ONLY a JSON object with this structure:
 
 Rules:  
 - Return 1 to 3 tasks, ordered by priority (frequency + recency).  
+- Do not use any tools in inference, answer directly based on context.
 - No extra text—only valid JSON.
 """
 
@@ -49,4 +50,6 @@ When crafting the message, consider using reference phrases like:
 - "I've seen you're concerned with [issue], here's what I found regarding that..."
 
 These phrases can help frame your message as being attentive to the user's repeated interests rather than intrusive.
+
+IMPORTANT: Begin your response with the identifier "[PROACTIVE] " to indicate this is a proactive message.
 """

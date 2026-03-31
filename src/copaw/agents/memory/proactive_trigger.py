@@ -3,10 +3,11 @@
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional, Any, TYPE_CHECKING
 from .proactive_types import ProactiveConfig
 from .proactive_responder import generate_proactive_response
+from .proactive_utils import get_last_message_ts
 from agentscope.message import Msg
 
 if TYPE_CHECKING:
@@ -15,12 +16,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def ensure_tz_aware(dt: datetime) -> datetime:
+    """Ensure datetime is timezone-aware, convert naive datetime to UTC."""
+    if dt.tzinfo is None:
+        # Assume naive datetime is in UTC
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 # Global storage for proactive configurations per session
 # In a real implementation, this would be tied to the session lifecycle
 proactive_configs: Dict[str, ProactiveConfig] = {}
 proactive_tasks: Dict[str, asyncio.Task] = {}  # Track active trigger loops (should NOT be cancelled on user interaction)
 proactive_responder_tasks: Dict[str, asyncio.Task] = {}  # Track active responder tasks (should be cancelled on user interaction)
-proactive_sessions: Dict[str, Dict[str, Any]] = {}  # Store session references (memory_manager, in_memory, etc.)
+
+# Store session references globally so they can be accessed during proactive trigger
+session_references: Dict[str, Dict[str, Any]] = {}
+
+# Import the active agent monitoring utilities
+from ...app.agent_context import get_current_agent_id
+from ...app.multi_agent_manager import MultiAgentManager
 
 
 def enable_proactive_for_session(
@@ -52,26 +68,26 @@ def enable_proactive_for_session(
     config = ProactiveConfig(
         enabled=True,
         idle_minutes=idle_minutes,
-        last_user_interaction=datetime.now(),  # This will be updated when user interacts
-        mode_enabled_time=datetime.now()  # Record when the proactive mode was enabled
+        last_user_interaction=datetime.now(timezone.utc),  # This will be updated when user interacts
+        mode_enabled_time=datetime.now(timezone.utc)  # Record when the proactive mode was enabled
     )
     proactive_configs[session_id] = config
 
     # Store session references for real memory access and message sending
-    session_refs = {}
-    if memory_manager:
-        session_refs['memory_manager'] = memory_manager
-    if in_memory:
-        session_refs['in_memory'] = in_memory
-    if channel_manager:
-        session_refs['channel_manager'] = channel_manager
-    if channel_id:
-        session_refs['channel_id'] = channel_id
-    if user_id:
-        session_refs['user_id'] = user_id
 
-    if session_refs:
-        proactive_sessions[session_id] = session_refs
+    if memory_manager:
+        session_references['memory_manager'] = memory_manager
+    if in_memory:
+        session_references['in_memory'] = in_memory
+    if channel_manager:
+        session_references['channel_manager'] = channel_manager
+    if channel_id:
+        session_references['channel_id'] = channel_id
+    if user_id:
+        session_references['user_id'] = user_id
+
+    # Store the session references globally
+    session_references[session_id] = session_id
 
     # Start the proactive trigger loop if not already running for this session
     if session_id not in proactive_tasks or proactive_tasks[session_id].done():
@@ -87,6 +103,34 @@ async def _run_trigger_loop(session_id: str) -> None:
         await proactive_trigger_loop(session_id)
     except Exception as e:
         logger.error(f"Error in proactive trigger loop for session {session_id}: {e}")
+
+
+class ActiveAgentMonitor:
+    """Monitor the active agent to detect if it is busy processing user requests."""
+
+    async def is_agent_busy(self, agent_id: str = None) -> bool:
+        """Check if the agent is currently busy processing tasks."""
+        # Use the provided agent_id or get the current active agent ID
+        if agent_id is None:
+            agent_id = get_current_agent_id()
+
+        try:
+            # Get the multi-agent manager by creating a new instance
+            multi_agent_manager = MultiAgentManager()
+            workspace = await multi_agent_manager.get_agent(agent_id)
+
+            # Check if the workspace has a task tracker and if it has active tasks
+            if hasattr(workspace, 'task_tracker') and workspace.task_tracker:
+                active_tasks = await workspace.task_tracker.list_active_tasks()
+                return len(active_tasks) > 0
+
+            return False
+        except Exception as e:
+            logger.error(f"Error checking if agent {agent_id} is busy: {e}")
+            return False
+
+# Global instance of the ActiveAgentMonitor
+active_agent_monitor = ActiveAgentMonitor()
 
 
 async def proactive_trigger_loop(session_id: str) -> None:
@@ -112,8 +156,12 @@ async def proactive_trigger_loop(session_id: str) -> None:
             if not config.enabled:
                 continue
 
+            # Check if the active agent is busy - if so, skip triggering proactive
+            if await active_agent_monitor.is_agent_busy():
+                continue
+
             # Use the actual session's last user message time instead of config
-            actual_last_user_time = await get_last_message_ts(session_id)
+            actual_last_user_time = await get_last_message_ts()
 
             # If we can't get the actual time from session, fall back to config
             if actual_last_user_time is not None:
@@ -122,12 +170,18 @@ async def proactive_trigger_loop(session_id: str) -> None:
                 last_interaction_dt = config.last_user_interaction
 
             if last_interaction_dt is not None:
-                elapsed_minutes = (datetime.now() - last_interaction_dt).total_seconds() / 60.0
+                # Ensure both datetimes are timezone-aware for comparison
+                last_interaction_tz_aware = ensure_tz_aware(last_interaction_dt)
+                current_time = ensure_tz_aware(datetime.now())
+                elapsed_minutes = (current_time - last_interaction_tz_aware).total_seconds() / 60.0
 
                 # Additional check: ensure that the time since proactive mode was enabled
                 # is at least the configured idle time for the first trigger
                 if config.mode_enabled_time:
-                    time_since_mode_enabled = (datetime.now() - config.mode_enabled_time).total_seconds() / 60.0
+                    # Ensure both datetimes are timezone-aware for comparison
+                    mode_enabled_time_tz_aware = ensure_tz_aware(config.mode_enabled_time)
+                    current_time = ensure_tz_aware(datetime.now())
+                    time_since_mode_enabled = (current_time - mode_enabled_time_tz_aware).total_seconds() / 60.0
                     should_trigger = elapsed_minutes >= config.idle_minutes and time_since_mode_enabled >= config.idle_minutes
                 else:
                     # Fallback to original logic if mode_enabled_time is not set
@@ -137,88 +191,55 @@ async def proactive_trigger_loop(session_id: str) -> None:
                     # Check multiple conditions to prevent duplicate triggers:
                     # 1. No proactive task currently running
                     # 2. Sufficient cooldown from last trigger attempt (to prevent rapid retries)
-                    # 3. Last message in session is not already a proactive message
+                    # 3. Last message in session is not already a proactive message (unless the last interaction was before proactive mode started)
                     # 4. Sufficient cooldown since last proactive was sent (to prevent rapid-fire triggering)
-                    
+
 
                     if (config.running_task_id is None and  # No proactive task currently running
                         (last_trigger_attempt is None or
-                         (datetime.now() - last_trigger_attempt).total_seconds() > 60)):  # At least 1 min cooldown from last attempt
+                         (ensure_tz_aware(datetime.now()) - ensure_tz_aware(last_trigger_attempt)).total_seconds() > 120)):  # At least 2 min cooldown from last attempt
+
+                        # Check if the last user interaction was before the proactive mode was enabled
+                        # If so, skip the proactive message check to prevent blocking new triggers
+                        last_interaction_was_before_mode_enabled = (
+                            last_interaction_tz_aware < mode_enabled_time_tz_aware
+                        )
 
                         # Double-check: is the last message already proactive?
-                        if not await is_last_message_proactive(session_id):
+                        # Skip this check if the last interaction was before proactive mode was enabled
+                        if last_interaction_was_before_mode_enabled or not await is_last_message_proactive():
                             # Mark that we're attempting to trigger proactive response
                             last_trigger_attempt = datetime.now()
 
                             # Trigger proactive response
                             config.running_task_id = f"proactive_{datetime.now().timestamp()}"
+
+                            # Get session references passed through enable_proactive_for_session function
+                            # We need to access them from a different mechanism since they're not directly available here
+                            # For now, we'll need to fetch them again from wherever they're stored
+
+
                             try:
-                                # Pass the session references if available
-                                session_refs = proactive_sessions.get(session_id, {})
-
-                                # Get access to the global app state to create a proper chat
-                                chat_manager = session_refs.get('chat_manager')
-                                if not chat_manager and 'channel_manager' in session_refs:
-                                    # Try to get the global multi-agent manager to access the chat manager
-                                    try:
-                                        from ...app._app import app
-                                        if hasattr(app.state, 'multi_agent_manager'):
-                                            multi_agent_manager = app.state.multi_agent_manager
-                                            # Try to get the default agent and its chat manager
-                                            if hasattr(multi_agent_manager, 'agents'):
-                                                default_agent = multi_agent_manager.agents.get("default")
-                                                if default_agent and hasattr(default_agent, 'chat_manager'):
-                                                    chat_manager = default_agent.chat_manager
-                                    except Exception:
-                                        chat_manager = None
-
-                                # Create or ensure proactive chat exists for the specific session
-                                if chat_manager:
-                                    try:
-                                        # Use the original session_id to ensure consistency with user's chat
-                                        proactive_chat_id = f"proactive_{session_id}"
-                                        # Check if proactive chat already exists for this session
-                                        proactive_chat = await chat_manager.get_chat(proactive_chat_id)
-                                        if not proactive_chat:
-                                            # Create proactive chat for this session
-                                            from ...app.runner.models import ChatSpec
-                                            proactive_chat = await chat_manager.create_chat(ChatSpec(
-                                                id=proactive_chat_id,
-                                                name="Proactive Message",
-                                                session_id=session_id,  # Use the original session_id
-                                                user_id=session_refs.get('user_id', 'system'),
-                                                channel=session_refs.get('channel_id', 'console'),
-                                                meta={"type": "proactive", "original_session": session_id}
-                                            ))
-                                    except Exception as e:
-                                        logger.warning(f"Could not create proactive chat for session {session_id}: {e}")
-                                        # If creating chat fails, continue anyway
-                                        pass
-
                                 # Create and track the responder task separately from the trigger loop
                                 responder_task = asyncio.create_task(
                                     generate_proactive_response(
                                         session_id,
-                                        memory_manager=session_refs.get('memory_manager'),
-                                        in_memory=session_refs.get('in_memory')
+                                        in_memory=session_references.get('in_memory')
                                     )
                                 )
                                 proactive_responder_tasks[session_id] = responder_task
 
                                 proactive_msg = await responder_task
 
+                                # Log the proactive message if it was generated
+                                if proactive_msg:
+                                    logger.info(f"Proactive message generated for session {session_id}: {str(proactive_msg)[:100]}...")
+
                                 # Clean up the responder task reference after completion
                                 if session_id in proactive_responder_tasks:
                                     del proactive_responder_tasks[session_id]
 
-                                if proactive_msg:
-                                    # Send the proactive message to the original session, so it appears in the chat list
-                                    await send_proactive_message(session_id=session_id, message=proactive_msg)
-                            except asyncio.CancelledError:
-                                logger.info(f"Proactive responder task cancelled for session {session_id}")
-                                # Clean up the responder task reference if it was cancelled
-                                if session_id in proactive_responder_tasks:
-                                    del proactive_responder_tasks[session_id]
+
                             except Exception as e:
                                 logger.error(f"Error in proactive responder for session {session_id}: {e}")
                                 # Clean up the responder task reference on error
@@ -231,7 +252,7 @@ async def proactive_trigger_loop(session_id: str) -> None:
                                     # Update last proactive sent time to prevent immediate re-triggering
                         else:
                             # Update the trigger attempt time even if we skip triggering due to proactive message check
-                            last_trigger_attempt = datetime.now()
+                            last_trigger_attempt = ensure_tz_aware(datetime.now())
         except asyncio.CancelledError:
             logger.info(f"Proactive trigger loop cancelled for session {session_id}")
             break
@@ -240,315 +261,73 @@ async def proactive_trigger_loop(session_id: str) -> None:
             # Continue loop despite errors to maintain resilience
 
 
-async def is_last_message_proactive(session_id: str) -> bool:
+async def is_last_message_proactive() -> bool:
     """Check if the last message in session was a proactive message.
-
-    Args:
-        session_id: Unique identifier for the session
+    Checks if the last message starts with [PROACTIVE].
 
     Returns:
         True if last message was proactive, False otherwise
     """
-    # First check if we have access to real session memory
-    session_refs = proactive_sessions.get(session_id, {})
-    in_memory = session_refs.get('in_memory')
+    from pathlib import Path
+    import json
+    from datetime import datetime
 
-    if in_memory:
-        # Access the actual session memory to check last message
-        try:
-            messages = await in_memory.get_memory(
-                exclude_mark=None,
-                prepend_summary=False,
-            )
-            if messages:
-                last_msg = messages[-1]
-                # Check if the last message has proactive metadata
-                if hasattr(last_msg, 'metadata') and last_msg.metadata:
-                    return last_msg.metadata.get('is_proactive', False)
-        except Exception as e:
-            logger.warning(f"Could not access session memory for proactive check: {e}")
+    # Use the function imported at the top of the file
+    active_agent_id = get_current_agent_id()
+    multi_agent_manager = MultiAgentManager()
+    workspace = await multi_agent_manager.get_agent(active_agent_id)
 
-    # Fallback to the original implementation
+    # Look for chats.json in the workspace directory
+    chats_file_path = Path(workspace.workspace_dir) / "chats.json"
+
+    if chats_file_path.exists():
+        with open(chats_file_path, 'r', encoding='utf-8') as f:
+            chats_data = json.load(f)
+
+        # Find the session with the most recent updated_at timestamp
+        latest_updated_session = None
+        latest_update_time = None
+        if 'chats' in chats_data and chats_data['chats']:
+            for session in chats_data['chats']:
+                updated_at_str = session.get('updated_at')
+                if updated_at_str:
+                    # Convert the timestamp string to datetime
+                    updated_at_dt = datetime.fromisoformat(updated_at_str.replace('Z', '+00:00'))
+
+                    # Ensure consistent timezone-aware comparison
+                    if latest_update_time is None or ensure_tz_aware(updated_at_dt) > ensure_tz_aware(latest_update_time):
+                        latest_update_time = updated_at_dt
+                        latest_updated_session = session
+
+        if latest_updated_session:
+            # Now we have the latest updated session, we can check the session's messages
+            # We need to load the session's history file based on the session_id
+            session_id = latest_updated_session.get('session_id')
+            session_id = session_id.replace(":","--")
+            user_id = latest_updated_session.get('user_id')
+            user_id = user_id.replace(":","--")
+            if session_id:
+                # Use _process_session_file to examine the session content
+                from .proactive_utils import _process_session_file
+                session_files = list(Path(workspace.workspace_dir).glob(f"sessions/{user_id}_{session_id}.json"))
+
+                if session_files:
+                    # Process the session file to check for proactive messages
+                    # This is a simplified approach - we'll examine the session's content
+                    session_file_path = session_files[0]
+                    mod_time = ensure_tz_aware(datetime.fromtimestamp(session_file_path.stat().st_mtime))
+                    session_content = _process_session_file(session_file_path, mod_time)
+                    try:
+                        latest_msg = session_content[0].get('message', {}).get('content', [{}])[0].get('text', '')
+                        # Check if the content contains [PROACTIVE] markers
+                        if "[PROACTIVE]" in latest_msg:
+                            logger.info("###Last Proactive Message Unresponded")
+                            return True
+                    except:
+                        logger.info("Message parsing error")
+                        return False
+
+
     return False
 
-
-async def get_last_message_ts(session_id: str) -> Optional[float]:
-    """Get the timestamp of the last message in session.
-
-    Args:
-        session_id: Unique identifier for the session
-
-    Returns:
-        Timestamp of last message or None if not available
-    """
-    # First check if we have access to real session memory
-    session_refs = proactive_sessions.get(session_id, {})
-    in_memory = session_refs.get('in_memory')
-
-    if in_memory:
-        try:
-            # Access the actual session memory to find last message
-            messages = await in_memory.get_memory(
-                exclude_mark=None,
-                prepend_summary=False,
-            )
-
-            # Look for the most recent message with timestamp
-            for msg in reversed(messages):
-                # Return timestamp if available
-                if hasattr(msg, 'timestamp'):
-                    from datetime import datetime
-                    # Convert string timestamp to datetime if needed
-                    if isinstance(msg.timestamp, str):
-                        try:
-                            # Handle various timestamp formats
-                            dt_obj = datetime.fromisoformat(msg.timestamp.replace('Z', '+00:00'))
-                            return dt_obj.timestamp()
-                        except:
-                            # If parsing fails, return None
-                            return None
-                    elif isinstance(msg.timestamp, (float, int)):
-                        return msg.timestamp
-                elif hasattr(msg, 'create_time'):  # Some messages might use create_time instead
-                    if isinstance(msg.create_time, str):
-                        try:
-                            dt_obj = datetime.fromisoformat(msg.create_time.replace('Z', '+00:00'))
-                            return dt_obj.timestamp()
-                        except:
-                            return None
-                    elif isinstance(msg.create_time, (float, int)):
-                        return msg.create_time
-        except Exception as e:
-            logger.warning(f"Could not access session memory for user message timestamp: {e}")
-
-    # Fallback to checking session activity times from proactive_utils
-    try:
-        from .proactive_utils import get_session_activity_times
-        session_activities = await get_session_activity_times()
-        if session_id in session_activities:
-            return session_activities[session_id]
-    except ImportError:
-        logger.warning("Could not import get_session_activity_times from proactive_utils")
-    except Exception as e:
-        logger.warning(f"Could not get session activity times: {e}")
-
-    # Fallback to the original implementation
-    global proactive_configs
-
-    if session_id in proactive_configs and proactive_configs[session_id].last_user_interaction:
-        return proactive_configs[session_id].last_user_interaction.timestamp()
-
-    return None
-
-
-def update_last_interaction_time(session_id: str) -> None:
-    """Update the last interaction time for a session.
-
-    Only cancels the active proactive responder task, NOT the trigger loop.
-    The trigger loop should continue running to monitor for future idle periods.
-
-    Args:
-        session_id: Unique identifier for the session
-    """
-    global proactive_configs
-
-    if session_id in proactive_configs:
-        # Update the config's last interaction time
-        proactive_configs[session_id].last_user_interaction = datetime.now()
-
-        # If we have access to session memory, we could potentially update
-        # session-specific information, but for now we just focus on the config
-
-        # Only cancel the proactive responder task if there's one running,
-        # but do NOT cancel the trigger loop
-        if session_id in proactive_responder_tasks and not proactive_responder_tasks[session_id].done():
-            logger.info(f"Cancelling proactive responder task for session {session_id} due to user interaction")
-            proactive_responder_tasks[session_id].cancel()
-
-            # Clean up the reference after cancelling
-            del proactive_responder_tasks[session_id]
-    else:
-        # Initialize config if not exists, with default settings
-        proactive_configs[session_id] = ProactiveConfig(
-            enabled=False,
-            idle_minutes=30,
-            last_user_interaction=datetime.now()
-        )
-
-
-def ensure_valid_session_id(channel_id: str, sender_id: str, provided_session_id: Optional[str] = None) -> str:
-    """Ensure we have a valid session_id, either provided or derived from system context.
-
-    Args:
-        channel_id: Channel identifier
-        sender_id: Sender identifier
-        provided_session_id: Session ID that may have been provided
-
-    Returns:
-        Valid session_id for use in the system
-    """
-    if provided_session_id:
-        return provided_session_id
-
-    # Generate a session ID based on channel and sender (following system convention)
-    return f"{channel_id}:{sender_id}"
-
-
-# Removed redundant create_session_id function - session_id should be provided by the system
-# instead of being created by this module
-
-
-async def send_proactive_message(session_id: str = "proactive_assistant", message: Msg = None) -> Optional[Msg]:
-    """Send a proactive message to the session and return the message.
-
-    Args:
-        session_id: Unique identifier for the session (defaults to proactive_assistant)
-        message: The proactive message to send
-
-    Returns:
-        The message that was sent (either original or a new one if conversion was needed)
-    """
-    # Helper function to safely convert content to string
-    def safe_content_str(content):
-        if isinstance(content, str):
-            return content
-        elif isinstance(content, list):
-            return " ".join(str(item) for item in content)
-        else:
-            return str(content)
-
-    # If no session_id provided, default to proactive_assistant
-    if not session_id:
-        session_id = "proactive_assistant"
-
-    # Get session references (memory_manager, in_memory, etc.) based on session_id
-    session_refs = proactive_sessions.get(session_id, {})
-    # in_memory = session_refs.get('in_memory')  # Not used in this function
-
-    # Extract channel and user info from session_id if it follows the format "channel:user_id"
-    # or from session_refs if available
-    channel_id = session_refs.get('channel_id', None)
-    user_id = session_refs.get('user_id', None)
-
-    if not channel_id or not user_id:
-        # Try to extract from session_id if it's in format "channel:user"
-        if ':' in session_id:
-            parts = session_id.split(':', 1)
-            if len(parts) >= 2:
-                channel_id = parts[0]
-                user_id = parts[1]
-
-        # If we still don't have channel_id or user_id, create default ones for proactive assistant
-        if not channel_id:
-            channel_id = "console"
-        if not user_id:
-            user_id = "proactive_system"
-
-
-    # If message is provided and has content, use it
-    if message and message.content:
-        content_str = safe_content_str(message.content)
-    else:
-        # Create a default message if none provided
-        content_str = "Proactive message content"
-        message = Msg(
-            name="Friday",
-            role="assistant",
-            content=content_str,
-            metadata={"is_proactive": True, "timestamp": datetime.now()}
-        )
-
-
-    try:
-        # Import the console push store to add the message
-        from ...app.console_push_store import append as push_store_append
-
-        if session_id and content_str.strip():
-            await push_store_append(session_id, f"[Proactive] {content_str}")
-            logger.info(f"Proactive message pushed to console store for session {session_id}")
-        else:
-            logger.warning(f"Session ID or content is empty, cannot send via console push store")
-
-    except Exception as e:
-        logger.error(f"Failed to send proactive message via console push store: {e}")
-        # If console push store fails, we'll try the channel manager as fallback
-        # Use channel manager as fallback if console push store fails
-        channel_manager = session_refs.get('channel_manager', None)
-
-        # Try to access channel manager from globals if available
-        if not channel_manager:
-            try:
-                # Since we're outside the request context, we need to get the
-                # global multi-agent manager to access channel managers
-                # Look for it in a common application state location
-                from ...app._app import app
-                if hasattr(app.state, 'multi_agent_manager'):
-                    multi_agent_manager = app.state.multi_agent_manager
-                    # In this context we can't use async/await, so we'll try to access
-                    # the default agent's channel manager if it exists
-                    if hasattr(multi_agent_manager, 'agents'):
-                        # Look for default agent in loaded agents
-                        default_agent = multi_agent_manager.agents.get("default")
-                        if default_agent and hasattr(default_agent, 'channel_manager'):
-                            channel_manager = default_agent.channel_manager
-
-            except Exception:
-                channel_manager = None
-
-        # If we have a channel manager, send the message through the appropriate channel
-        if channel_manager and channel_id and user_id:
-            try:
-                # Convert the message to a format suitable for the channel manager
-                await channel_manager.send_text(
-                    channel=channel_id,
-                    user_id=user_id,
-                    session_id=session_id,
-                    text=content_str,  # Already prepared above
-                    meta={'is_proactive': True}
-                )
-                logger.info(f"Proactive message sent via channel manager to {channel_id}:{user_id}")
-            except Exception as e:
-                logger.error(f"Failed to send proactive message via channel manager: {e}")
-                # Still log the message even if channel send fails
-                logger.info(f"Proactive message content (fallback logging): {content_str}")
-
-    # Return the message object that was processed
-    return message
-
         
-
-
-
-def get_proactive_config(session_id: str) -> Optional[ProactiveConfig]:
-    """Get the proactive configuration for a session.
-
-    Args:
-        session_id: Unique identifier for the session
-
-    Returns:
-        ProactiveConfig if exists, None otherwise
-    """
-    return proactive_configs.get(session_id)
-
-
-
-def reset_proactive_session(session_id: str) -> None:
-    """Reset the proactive session, disabling proactive for this session.
-
-    Args:
-        session_id: Unique identifier for the session
-    """
-    if session_id in proactive_configs:
-        del proactive_configs[session_id]
-
-    if session_id in proactive_sessions:
-        del proactive_sessions[session_id]
-
-    # Only cancel the responder task if it exists
-    if session_id in proactive_responder_tasks and not proactive_responder_tasks[session_id].done():
-        proactive_responder_tasks[session_id].cancel()
-        del proactive_responder_tasks[session_id]
-
-    # Cancel the trigger loop task if it exists
-    if session_id in proactive_tasks and not proactive_tasks[session_id].done():
-        proactive_tasks[session_id].cancel()

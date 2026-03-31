@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 from agentscope.message import Msg, TextBlock
 
 from copaw.config import load_config
-from .memory import enable_proactive_for_session, update_last_interaction_time, get_proactive_config, reset_proactive_session
 
 if TYPE_CHECKING:
     from .memory import MemoryManager
@@ -353,13 +352,13 @@ class CommandHandler(ConversationCommandHandlerMixin):
         if not args or args == "on":
             # Enable with default 30 minutes if no argument or 'on' is specified
             try:
+                from .memory import enable_proactive_for_session
                 result = enable_proactive_for_session(
                     self.agent_name,
                     30,
                     memory_manager=self.memory_manager,
                     in_memory=self.memory
                 )
-                update_last_interaction_time(self.agent_name)  # Reset the timer when enabled
                 return await self._make_system_msg(
                     f"**Proactive Mode Enabled**\n\n"
                     f"- Idle time: 30 minutes\n"
@@ -373,9 +372,24 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 )
 
         elif args == "off":
-            # Disable proactive mode
+            # Disable proactive mode - call the cleanup function
             try:
-                reset_proactive_session(self.agent_name)
+                from .memory import proactive_trigger_loop
+                # We need to find a way to cancel the proactive task for this session
+                # Since we don't have reset_proactive_session, let's cancel the proactive task directly
+                import asyncio
+                from .memory.proactive_trigger import proactive_tasks
+
+                if self.agent_name in proactive_tasks:
+                    task = proactive_tasks[self.agent_name]
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    del proactive_tasks[self.agent_name]
+
                 return await self._make_system_msg(
                     f"**Proactive Mode Disabled**\n\n"
                     f"- Proactive monitoring has been stopped\n"
@@ -390,19 +404,27 @@ class CommandHandler(ConversationCommandHandlerMixin):
         elif args == "status":
             # Show current proactive status
             try:
-                config = get_proactive_config(self.agent_name)
-                if config and config.enabled:
-                    status = "ENABLED"
-                    idle_time = config.idle_minutes
-                    last_interaction = config.last_user_interaction.strftime("%Y-%m-%d %H:%M:%S") if config.last_user_interaction else "UNKNOWN"
-                    last_proactive = config.last_proactive_sent.strftime("%Y-%m-%d %H:%M:%S") if config.last_proactive_sent else "NEVER"
-                    return await self._make_system_msg(
-                        f"**Proactive Mode Status**\n\n"
-                        f"- Status: {status}\n"
-                        f"- Idle Time: {idle_time} minutes\n"
-                        f"- Last Interaction: {last_interaction}\n"
-                        f"- Last Proactive Sent: {last_proactive}"
-                    )
+                from .memory.proactive_trigger import proactive_configs
+                if self.agent_name in proactive_configs:
+                    config = proactive_configs[self.agent_name]
+                    if config.enabled:
+                        status = "ENABLED"
+                        idle_time = config.idle_minutes
+                        last_interaction = config.last_user_interaction.strftime("%Y-%m-%d %H:%M:%S") if config.last_user_interaction else "UNKNOWN"
+                        last_proactive = config.last_proactive_sent.strftime("%Y-%m-%d %H:%M:%S") if config.last_proactive_sent else "NEVER"
+                        return await self._make_system_msg(
+                            f"**Proactive Mode Status**\n\n"
+                            f"- Status: {status}\n"
+                            f"- Idle Time: {idle_time} minutes\n"
+                            f"- Last Interaction: {last_interaction}\n"
+                            f"- Last Proactive Sent: {last_proactive}"
+                        )
+                    else:
+                        return await self._make_system_msg(
+                            f"**Proactive Mode Status**\n\n"
+                            f"- Status: DISABLED\n"
+                            f"- Proactive monitoring is not active"
+                        )
                 else:
                     return await self._make_system_msg(
                         f"**Proactive Mode Status**\n\n"
@@ -426,13 +448,13 @@ class CommandHandler(ConversationCommandHandlerMixin):
                         f"- Example: /proactive 45 (for 45 minutes)"
                     )
 
+                from .memory import enable_proactive_for_session
                 result = enable_proactive_for_session(
                     self.agent_name,
                     minutes,
                     memory_manager=self.memory_manager,
                     in_memory=self.memory
                 )
-                update_last_interaction_time(self.agent_name)  # Reset the timer when enabled
                 return await self._make_system_msg(
                     f"**Proactive Mode Enabled**\n\n"
                     f"- Idle time: {minutes} minutes\n"

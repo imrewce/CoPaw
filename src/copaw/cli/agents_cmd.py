@@ -366,6 +366,7 @@ def chat_cmd(
       - With --mode stream: Incremental updates (SSE)
     """
     base_url = resolve_base_url(ctx, base_url)
+    print("###########",base_url)
 
     final_session_id = _resolve_session_id(
         from_agent,
