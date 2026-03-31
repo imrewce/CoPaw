@@ -321,7 +321,7 @@ async def is_last_message_proactive() -> bool:
                         latest_msg = session_content[0].get('message', {}).get('content', [{}])[0].get('text', '')
                         # Check if the content contains [PROACTIVE] markers
                         if "[PROACTIVE]" in latest_msg:
-                            logger.info("###Last Proactive Message Unresponded")
+                            logger.info("Last Proactive Message Unresponded")
                             return True
                     except:
                         logger.info("Message parsing error")
