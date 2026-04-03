@@ -64,8 +64,9 @@ async def generate_proactive_response(
 
 
     # Combine and build memory context
-    memory_context_str = build_proactive_memory_context(
-        agent_workspace_path=str(workspace.workspace_dir)
+    memory_context_str = await build_proactive_memory_context(
+        agent_workspace_path=str(workspace.workspace_dir),
+        workspace=workspace
     )
 
 
@@ -106,6 +107,8 @@ async def generate_proactive_response(
             results[-1], agent
         )
 
+        if message_content:
+            return message_content
 
     return None
 
@@ -236,16 +239,28 @@ async def _execute_query(query: str, agent) -> ProactiveQueryResult:
     ))
 
     success = False
-    response_content = response.content[0].get('text', '')
+    response_content = ""
+    if response and response.content:
+        if isinstance(response.content, list) and len(response.content) > 0:
+            first_content = response.content[0]
+            if isinstance(first_content, dict):
+                response_content = first_content.get('text', '')
+            elif isinstance(first_content, str):
+                response_content = first_content
+            else:
+                response_content = str(first_content)
+        else:
+            response_content = str(response.content)
+
     if response_content:
         match = re.search(r'\[(SUCCESS|FAILURE)\]\s*$', response_content.strip())
         if match:
             success = (match.group(1) == 'SUCCESS')
 
-        return ProactiveQueryResult(
-            query=query,
-            success=success,
-            data=response_content,
+    return ProactiveQueryResult(
+        query=query,
+        success=success,
+        data=response_content,
     )
 
 

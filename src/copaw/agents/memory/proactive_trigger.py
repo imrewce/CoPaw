@@ -268,65 +268,80 @@ async def is_last_message_proactive() -> bool:
     Returns:
         True if last message was proactive, False otherwise
     """
-    from pathlib import Path
-    import json
     from datetime import datetime
+    from agentscope.memory import InMemoryMemory
+    from ...app.runner.utils import agentscope_msg_to_message
 
     # Use the function imported at the top of the file
     active_agent_id = get_current_agent_id()
     multi_agent_manager = MultiAgentManager()
     workspace = await multi_agent_manager.get_agent(active_agent_id)
 
-    # Look for chats.json in the workspace directory
-    chats_file_path = Path(workspace.workspace_dir) / "chats.json"
-
-    if chats_file_path.exists():
-        with open(chats_file_path, 'r', encoding='utf-8') as f:
-            chats_data = json.load(f)
+    try:
+        # Get chats using chat manager instead of reading chats.json directly
+        chats = await workspace.chat_manager.list_chats()
 
         # Find the session with the most recent updated_at timestamp
         latest_updated_session = None
         latest_update_time = None
-        if 'chats' in chats_data and chats_data['chats']:
-            for session in chats_data['chats']:
-                updated_at_str = session.get('updated_at')
-                if updated_at_str:
-                    # Convert the timestamp string to datetime
-                    updated_at_dt = datetime.fromisoformat(updated_at_str.replace('Z', '+00:00'))
+        for session in chats:
+            updated_at_dt = session.updated_at
 
-                    # Ensure consistent timezone-aware comparison
-                    if latest_update_time is None or ensure_tz_aware(updated_at_dt) > ensure_tz_aware(latest_update_time):
-                        latest_update_time = updated_at_dt
-                        latest_updated_session = session
+            # Ensure consistent timezone-aware comparison
+            if latest_update_time is None or ensure_tz_aware(updated_at_dt) > ensure_tz_aware(latest_update_time):
+                latest_update_time = updated_at_dt
+                latest_updated_session = session
 
         if latest_updated_session:
             # Now we have the latest updated session, we can check the session's messages
-            # We need to load the session's history file based on the session_id
-            session_id = latest_updated_session.get('session_id')
-            session_id = session_id.replace(":","--")
-            user_id = latest_updated_session.get('user_id')
-            user_id = user_id.replace(":","--")
-            if session_id:
-                # Use _process_session_file to examine the session content
-                from .proactive_utils import _process_session_file
-                session_files = list(Path(workspace.workspace_dir).glob(f"sessions/{user_id}_{session_id}.json"))
+            # Load the session's memory using InMemoryMemory
+            session_id = latest_updated_session.session_id
+            user_id = latest_updated_session.user_id
 
-                if session_files:
-                    # Process the session file to check for proactive messages
-                    # This is a simplified approach - we'll examine the session's content
-                    session_file_path = session_files[0]
-                    mod_time = ensure_tz_aware(datetime.fromtimestamp(session_file_path.stat().st_mtime))
-                    session_content = _process_session_file(session_file_path, mod_time)
-                    try:
-                        latest_msg = session_content[0].get('message', {}).get('content', [{}])[0].get('text', '')
-                        # Check if the content contains [PROACTIVE] markers
-                        if "[PROACTIVE]" in latest_msg:
+            if session_id:
+                # Get the session state dictionary
+                state = await workspace.runner.session.get_session_state_dict(
+                    session_id,
+                    user_id,
+                )
+
+                if not state:
+                    return False
+
+                # Extract memory data from the state
+                memories_data = state.get("agent", {}).get("memory", [])
+
+                # Create InMemoryMemory instance and load state
+                memory = InMemoryMemory()
+                memory.load_state_dict(memories_data)
+
+                # Get memory messages
+                messages = await memory.get_memory()
+
+                # Convert to serializable format
+                serializable_messages = agentscope_msg_to_message(messages)
+
+                # Check if the latest message contains [PROACTIVE] markers
+                if serializable_messages:
+                    # Get the latest message content
+                    latest_msg = serializable_messages[-1]  # Latest message is at the end
+                    content = latest_msg.get('content', [])
+
+                    # Process content depending on format
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and 'text' in item:
+                                if "[PROACTIVE]" in item['text']:
+                                    logger.info("Last Proactive Message Unresponded")
+                                    return True
+                    elif isinstance(content, str):
+                        if "[PROACTIVE]" in content:
                             logger.info("Last Proactive Message Unresponded")
                             return True
-                    except:
-                        logger.info("Message parsing error")
-                        return False
 
+    except Exception as e:
+        logger.warning(f"Could not check if last message was proactive: {e}")
+        return False
 
     return False
 

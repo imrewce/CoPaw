@@ -19,10 +19,11 @@ def ensure_tz_aware(dt):
 
 
 
-def build_proactive_memory_context(
+async def build_proactive_memory_context(
     agent_workspace_path: Optional[str] = None,
     max_session_messages: int = 30,
-    max_session_chars: int = 12500
+    max_session_chars: int = 12500,
+    workspace = None
 ) -> str:
     """Build a combined memory context for proactive agent from active agent workspace.
 
@@ -30,6 +31,7 @@ def build_proactive_memory_context(
         agent_workspace_path: Path to agent workspace - must be provided, no fallback to WORKING_DIR
         max_session_messages: Maximum number of recent messages to include from sessions (default 30)
         max_session_chars: Maximum character length for the session context (default 12500)
+        workspace: Workspace instance to access chat manager and session memory
     """
     import logging
 
@@ -39,9 +41,16 @@ def build_proactive_memory_context(
 
     combined_context = "[SESSION CONTEXT]\n"
 
+    # Get workspace reference if not provided
+    if workspace is None:
+        from ...app.agent_context import get_current_agent_id
+        from ...app.multi_agent_manager import MultiAgentManager
+        active_agent_id = get_current_agent_id()
+        multi_agent_manager = MultiAgentManager()
+        workspace = await multi_agent_manager.get_agent(active_agent_id)
+
     # Read from active agent workspace - sessions and chats
-        # Read chat sessions metadata
-    sessions_to_read = _read_chat_sessions_metadata(agent_workspace_path)
+    sessions_to_read = await _read_chat_sessions_metadata(agent_workspace_path, workspace)
 
     if not sessions_to_read:
         return ""
@@ -49,8 +58,8 @@ def build_proactive_memory_context(
     # Filter to recent sessions
     filtered_sessions = _filter_recent_sessions(sessions_to_read)
 
-    # Collect messages from session files
-    all_messages = _collect_session_messages(agent_workspace_path, filtered_sessions)
+    # Collect messages from session memory
+    all_messages = _collect_session_messages(agent_workspace_path, filtered_sessions, workspace)
 
     # Format messages into context string
     session_context = ""
@@ -63,31 +72,50 @@ def build_proactive_memory_context(
     return combined_context
 
 
-def _process_session_file(session_file, mod_time) -> List[dict]:
-    """Process a single session file and return a list of messages.
+async def _process_session_memory(session_id: str, user_id: str, workspace) -> List[dict]:
+    """Process a session's memory by loading it through InMemoryMemory and return a list of messages.
 
     Args:
-        session_file: Path to the session JSON file
-        mod_time: Modification time of the file
+        session_id: Session identifier
+        user_id: User identifier
+        workspace: Workspace instance
 
     Returns:
         List of messages with timestamps
     """
     import logging
-    from datetime import datetime, timezone
-    import json
+    from datetime import datetime
+    from agentscope.memory import InMemoryMemory
+    from ...app.runner.utils import agentscope_msg_to_message
     logger = logging.getLogger(__name__)
 
     try:
-        with open(session_file, "r", encoding="utf-8") as f:
-            session_data = json.load(f)
+        # Get the session state dictionary
+        state = await workspace.runner.session.get_session_state_dict(
+            session_id,
+            user_id,
+        )
 
-        # Different session files might have different structures
-        # Try common structures used in the application
-        messages = []
+        if not state:
+            return []
 
-        # Helper function to process a single message
-        def process_message(msg, default_mod_time):
+        # Extract memory data from the state
+        memories_data = state.get("agent", {}).get("memory", [])
+
+        # Create InMemoryMemory instance and load state
+        memory = InMemoryMemory()
+        memory.load_state_dict(memories_data)
+
+        # Get memory messages
+        messages = await memory.get_memory()
+
+        # Convert to serializable format
+        serializable_messages = agentscope_msg_to_message(messages)
+
+        # Process messages and filter out system and internal messages
+        processed_messages = []
+
+        def process_message(msg, default_time):
             if not msg or not isinstance(msg, dict):
                 return None
 
@@ -119,48 +147,31 @@ def _process_session_file(session_file, mod_time) -> List[dict]:
                     parsed_timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00").replace("+00:00", ""))
                     timestamp = ensure_tz_aware(parsed_timestamp)
                 else:
-                    # Use file modification time if no timestamp in message
-                    timestamp = ensure_tz_aware(default_mod_time)
+                    # Use current time if no timestamp in message
+                    timestamp = ensure_tz_aware(default_time)
             except:
-                timestamp = ensure_tz_aware(default_mod_time)
+                timestamp = ensure_tz_aware(default_time)
 
             return {
                 "message": msg,
                 "timestamp": timestamp
             }
 
-        # Structure from the example: agent.memory.content as list of [user_msg, assistant_msg]
-        content_list = session_data["agent"]["memory"].get("content", [])
-
-        for item_pair in content_list:
-            if isinstance(item_pair, list) and len(item_pair) >= 1:
-                # First element might be user message
-                user_msg = item_pair[0] if len(item_pair) > 0 and item_pair[0] else None
-                # Second element might be assistant response
-                assistant_resp = item_pair[1] if len(item_pair) > 1 and item_pair[1] else []
-
-                # Process user message if exists and is valid
-                processed_user_msg = process_message(user_msg, mod_time)
-                if processed_user_msg:
-                    messages.append(processed_user_msg)
-
-                # Process assistant response if exists
-                if isinstance(assistant_resp, list):
-                    for resp_item in assistant_resp:
-                        processed_resp = process_message(resp_item, mod_time)
-                        if processed_resp:
-                            messages.append(processed_resp)
-
+        # Process all messages
+        for msg in serializable_messages:
+            processed_msg = process_message(msg, datetime.now())
+            if processed_msg:
+                processed_messages.append(processed_msg)
 
         # Sort messages by timestamp (descending - most recent first)
-        messages.sort(key=lambda x: x["timestamp"], reverse=True)
+        processed_messages.sort(key=lambda x: x["timestamp"], reverse=True)
 
-        logger.info(f"Processed session file: {session_file.name}, filtered out messages containing thinking/tool_use/system roles")
+        logger.info(f"Processed session memory for session {session_id} and user {user_id}, filtered out messages containing thinking/tool_use/system roles")
 
-        return messages
+        return processed_messages
 
     except Exception as e:
-        logger.warning(f"Could not read session file {session_file}: {e}")
+        logger.warning(f"Could not read session memory for session {session_id} and user {user_id}: {e}")
         return []
 
 
@@ -242,64 +253,44 @@ def extract_content(content) -> str:
         return str(content)
 
 
-def _read_chat_sessions_metadata(agent_workspace_path: str) -> List[dict]:
-    """Read chat sessions metadata from chats.json file.
+async def _read_chat_sessions_metadata(agent_workspace_path: str, workspace) -> List[dict]:
+    """Read chat sessions metadata from chat manager.
 
     Args:
-        agent_workspace_path: Path to the agent workspace
+        agent_workspace_path: Path to the agent workspace (for backward compatibility)
+        workspace: Workspace instance to access chat manager
 
     Returns:
         List of session metadata dictionaries
     """
     import logging
-    from datetime import datetime, timezone
-    import json
-    from pathlib import Path
-
+    from datetime import datetime
     logger = logging.getLogger(__name__)
 
-    chats_file_path = Path(agent_workspace_path) / "chats.json"
     sessions_to_read = []
 
-    if not chats_file_path.exists():
-        logger.warning(f"chats.json not found at {chats_file_path}")
-        return []
-
     try:
-        with open(chats_file_path, "r", encoding="utf-8") as f:
-            chats_data = json.load(f)
+        # Get all chats using chat_manager.list_chats()
+        chats = await workspace.chat_manager.list_chats()
 
-        # Extract session info from chats.json
-        if 'chats' in chats_data and chats_data['chats']:
-            for chat in chats_data['chats']:
-                user_id = chat.get('user_id', '')
-                session_id = chat.get('session_id', '')
+        # Extract session info from chats
+        for chat in chats:
+            user_id = chat.user_id
+            session_id = chat.session_id
 
-                # Format file name according to requirements (replace ':' with '--')
-                formatted_user_id = user_id.replace(':', '--')
-                formatted_session_id = session_id.replace(':', '--')
-                filename = f"{formatted_user_id}_{formatted_session_id}.json"
+            # Get modification time from the chat's updated_at
+            updated_at_dt = chat.updated_at
+            updated_at_dt = ensure_tz_aware(updated_at_dt)
 
-                # Get modification time from chats.json
-                updated_at_str = chat.get('updated_at')
-                if updated_at_str:
-                    try:
-                        updated_at_dt = datetime.fromisoformat(updated_at_str.replace('Z', '+00:00'))
-                        updated_at_dt = ensure_tz_aware(updated_at_dt)
-                    except ValueError:
-                        updated_at_dt = ensure_tz_aware(datetime.fromtimestamp(chats_file_path.stat().st_mtime))
-                else:
-                    updated_at_dt = ensure_tz_aware(datetime.fromtimestamp(chats_file_path.stat().st_mtime))
-
-                sessions_to_read.append({
-                    'filename': filename,
-                    'user_id': user_id,
-                    'session_id': session_id,
-                    'mod_time': updated_at_dt
-                })
+            sessions_to_read.append({
+                'filename': f"{user_id.replace(':', '--')}_{session_id.replace(':', '--')}.json",  # Kept for backward compatibility
+                'user_id': user_id,
+                'session_id': session_id,
+                'mod_time': updated_at_dt
+            })
 
     except Exception as e:
-        logger.warning(f"Could not read chats.json file: {e}")
+        logger.warning(f"Could not read chats through chat_manager: {e}")
 
     return sessions_to_read
 
@@ -337,39 +328,35 @@ def _filter_recent_sessions(sessions_to_read: List[dict], days: int = 3) -> List
     return filtered_sessions
 
 
-def _collect_session_messages(agent_workspace_path: str, filtered_sessions: List[dict]) -> List[dict]:
-    """Collect all messages from session files.
+def _collect_session_messages(agent_workspace_path: str, filtered_sessions: List[dict], workspace) -> List[dict]:
+    """Collect all messages from session memory using InMemoryMemory.
 
     Args:
-        agent_workspace_path: Path to the agent workspace
+        agent_workspace_path: Path to the agent workspace (for backward compatibility)
         filtered_sessions: List of filtered session metadata
+        workspace: Workspace instance to access session memory
 
     Returns:
         List of messages with timestamps
     """
     import logging
-    from pathlib import Path
 
     logger = logging.getLogger(__name__)
 
     all_messages = []  # Collect all messages to be sorted later
 
-    # Now read the corresponding session files from sessions directory
-    sessions_dir = Path(agent_workspace_path) / "sessions"
-    if sessions_dir.exists():
-        for session_info in filtered_sessions:
-            session_file_path = sessions_dir / session_info['filename']
+    # Access the session memories through the workspace's memory system
+    for session_info in filtered_sessions:
+        session_id = session_info['session_id']
+        user_id = session_info['user_id']
 
-            if session_file_path.exists():
-                try:
-                    # Pass the modification time from chats.json - returns list of messages
-                    session_messages = _process_session_file(session_file_path, session_info['mod_time'])
-                    if session_messages:
-                        all_messages.extend(session_messages)  # Extend instead of append
-                except Exception as e:
-                    logger.warning(f"Could not read session file {session_file_path}: {e}")
-            else:
-                logger.warning(f"Session file does not exist: {session_file_path}")
+        try:
+            # Pass the modification time from chats.json - returns list of messages
+            session_messages = _process_session_memory(session_id, user_id, workspace)
+            if session_messages:
+                all_messages.extend(session_messages)  # Extend instead of append
+        except Exception as e:
+            logger.warning(f"Could not read session memory for session {session_id} and user {user_id}: {e}")
 
     return all_messages
 
@@ -424,95 +411,64 @@ def _format_session_messages(all_messages: List[dict], max_messages: int = 30, m
 
 
 
-def get_last_message_ts(in_memory: Optional['ReMeInMemoryMemory'] = None):
+async def get_last_message_ts(in_memory: Optional['ReMeInMemoryMemory'] = None):
     """
     Attempts to get the timestamp of the last message from in-memory storage.
-    If that fails, it falls back to using build_proactive_memory_context to retrieve the timestamp.
+    If that fails, it falls back to using chat manager to retrieve the timestamp.
 
     Args:
-        session_id: The session identifier
         in_memory: Optional in-memory instance to access session history
 
     Returns:
         The timestamp of the last message from session or None if not found
     """
-    import asyncio
     import logging
+    from datetime import datetime
     logger = logging.getLogger(__name__)
 
-    async def _async_get_last_message_ts():
-        # First try getting the last message from in_memory
-        if in_memory:
-            try:
-                messages = await in_memory.get_memory(
-                    exclude_mark=None,
-                    prepend_summary=False,
-                )
-
-                if messages:
-                    # Return the timestamp of the last message
-                    last_msg = messages[-1]
-                    if hasattr(last_msg, 'timestamp'):
-                        return last_msg.timestamp
-            except Exception:
-                # If reading from in_memory fails, proceed to fallback method
-                pass
-
-
+    # First try getting the last message from in_memory
+    if in_memory:
         try:
-            from ...app.agent_context import get_current_agent_id
-            from ...app.multi_agent_manager import MultiAgentManager
-            from datetime import datetime
-            import json
-            from pathlib import Path
+            messages = await in_memory.get_memory(
+                exclude_mark=None,
+                prepend_summary=False,
+            )
 
-            # Get current agent workspace to locate chats.json
-            multi_agent_manager = MultiAgentManager()
-            agent_id = get_current_agent_id()
-            workspace = await multi_agent_manager.get_agent(agent_id)
+            if messages:
+                # Return the timestamp of the last message
+                last_msg = messages[-1]
+                if hasattr(last_msg, 'timestamp'):
+                    return last_msg.timestamp
+        except Exception:
+            # If reading from in_memory fails, proceed to fallback method
+            pass
 
-            # Look for chats.json in the workspace directory
-            chats_file_path = Path(workspace.workspace_dir) / "chats.json"
 
-            if chats_file_path.exists():
-                with open(chats_file_path, 'r', encoding='utf-8') as f:
-                    chats_data = json.load(f)
-
-                # Find the session with the most recent updated_at timestamp
-                latest_update_ts = None
-                if 'chats' in chats_data and chats_data['chats']:
-                    for session in chats_data['chats']:
-                        updated_at_str = session.get('updated_at')
-                        if updated_at_str:
-                            # Convert the timestamp string to datetime
-                            updated_at_dt = datetime.fromisoformat(updated_at_str.replace('Z', '+00:00'))
-                            # Ensure both are timezone-aware for comparison
-                            updated_at_dt = ensure_tz_aware(updated_at_dt)
-                            updated_at_timestamp = updated_at_dt.timestamp()
-
-                            if latest_update_ts is None or updated_at_timestamp > latest_update_ts:
-                                latest_update_ts = updated_at_timestamp
-
-                return latest_update_ts
-
-        except Exception as e:
-            logger.warning(f"Could not read chats.json for fallback: {e}")
-            return None
-
-        return None
-
-    # Since this function is intended to be synchronous but uses async operations internally,
-    # we need to run the async function using asyncio.run
-    # However, this can cause issues if there's already a running event loop
     try:
-        # Check if there's an existing event loop
-        asyncio.get_running_loop()
-        # If we're in an async context, return a coroutine that the caller can await
-        import functools
-        @functools.wraps(_async_get_last_message_ts)
-        async def wrapper():
-            return await _async_get_last_message_ts()
-        return wrapper()
-    except RuntimeError:
-        # No running loop, safe to use asyncio.run
-        return asyncio.run(_async_get_last_message_ts())
+        from ...app.agent_context import get_current_agent_id
+        from ...app.multi_agent_manager import MultiAgentManager
+
+        # Get current agent workspace to access chat manager
+        multi_agent_manager = MultiAgentManager()
+        agent_id = get_current_agent_id()
+        workspace = await multi_agent_manager.get_agent(agent_id)
+
+        # Get chats using chat manager
+        chats = await workspace.chat_manager.list_chats()
+
+        # Find the session with the most recent updated_at timestamp
+        latest_update_ts = None
+        for session in chats:
+            # Convert the timestamp to datetime
+            updated_at_dt = session.updated_at
+            updated_at_dt = ensure_tz_aware(updated_at_dt)
+            updated_at_timestamp = updated_at_dt.timestamp()
+
+            if latest_update_ts is None or updated_at_timestamp > latest_update_ts:
+                latest_update_ts = updated_at_timestamp
+
+        return latest_update_ts
+
+    except Exception as e:
+        logger.warning(f"Could not read chats through chat manager for fallback: {e}")
+        return None
