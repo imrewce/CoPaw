@@ -179,10 +179,11 @@ async def _extract_tasks_from_memory(memory_context: str, agent) -> List[Proacti
     """Extract likely user tasks from memory context using the shared agent."""
 
     # Process the memory context to extract tasks
+    print("##########Memory context:", memory_context)
     response = await agent.reply(Msg(
         name="User",
         role="user",
-        content=f"{PROACTIVE_TASK_EXTRACTION_PROMPT}\n#Memories: {memory_context}"
+        content=f"{PROACTIVE_TASK_EXTRACTION_PROMPT}\n#Contexts: {memory_context}"
     ))
 
     if not response or not response.content:

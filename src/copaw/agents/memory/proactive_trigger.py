@@ -325,17 +325,37 @@ async def is_last_message_proactive() -> bool:
                 if serializable_messages:
                     # Get the latest message content
                     latest_msg = serializable_messages[-1]  # Latest message is at the end
-                    content = latest_msg.get('content', [])
 
-                    # Process content depending on format
-                    if isinstance(content, list):
-                        for item in content:
-                            if isinstance(item, dict) and 'text' in item:
-                                if "[PROACTIVE]" in item['text']:
+                    # Access content from the Message object directly
+                    # The Message object has a contents property which is a list of content items
+                    contents = getattr(latest_msg, 'contents', [])
+
+                    # Process the contents
+                    if contents and isinstance(contents, list):
+                        for content_item in contents:
+                            # Check if content_item has text attribute (for TextContent)
+                            if hasattr(content_item, 'text'):
+                                if "[PROACTIVE]" in content_item.text:
                                     logger.info("Last Proactive Message Unresponded")
                                     return True
-                    elif isinstance(content, str):
-                        if "[PROACTIVE]" in content:
+                            # Check if content_item has data attribute (for DataContent)
+                            elif hasattr(content_item, 'data'):
+                                if isinstance(content_item.data, str) and "[PROACTIVE]" in content_item.data:
+                                    logger.info("Last Proactive Message Unresponded")
+                                    return True
+                                elif isinstance(content_item.data, dict):
+                                    # If data is a dict, check its string representation
+                                    if "[PROACTIVE]" in str(content_item.data):
+                                        logger.info("Last Proactive Message Unresponded")
+                                        return True
+                            # As a fallback, check if content_item is string-like
+                            else:
+                                if "[PROACTIVE]" in str(content_item):
+                                    logger.info("Last Proactive Message Unresponded")
+                                    return True
+                    # If contents is empty or not a list, check the message's string representation
+                    else:
+                        if "[PROACTIVE]" in str(latest_msg):
                             logger.info("Last Proactive Message Unresponded")
                             return True
 

@@ -50,16 +50,17 @@ async def build_proactive_memory_context(
         workspace = await multi_agent_manager.get_agent(active_agent_id)
 
     # Read from active agent workspace - sessions and chats
-    sessions_to_read = await _read_chat_sessions_metadata(agent_workspace_path, workspace)
+    sessions_to_read = await _read_chat_sessions_metadata(workspace)
 
     if not sessions_to_read:
         return ""
 
     # Filter to recent sessions
     filtered_sessions = _filter_recent_sessions(sessions_to_read)
+    print("#############", filtered_sessions)
 
     # Collect messages from session memory
-    all_messages = _collect_session_messages(agent_workspace_path, filtered_sessions, workspace)
+    all_messages = await _collect_session_messages(filtered_sessions, workspace)
 
     # Format messages into context string
     session_context = ""
@@ -108,6 +109,7 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
 
         # Get memory messages
         messages = await memory.get_memory()
+        
 
         # Convert to serializable format
         serializable_messages = agentscope_msg_to_message(messages)
@@ -116,18 +118,33 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
         processed_messages = []
 
         def process_message(msg, default_time):
-            if not msg or not isinstance(msg, dict):
-                return None
+            from agentscope_runtime.engine.schemas.agent_schemas import MessageType
 
-            # Filter out messages with role "system" and types "thinking"/"tool_use"
-            role = msg.get("role", "")
+            # Handle both dict and Message object types
+            if hasattr(msg, 'role'):  # It's a Message object
+                role = msg.role or ""
+
+                # Get content from Message object
+                content = msg.content or []
+
+                # Determine message type from Message object
+                msg_type = getattr(msg, 'type', '')
+            else:  # It's a dict
+                role = msg.get("role", "")
+
+                # Check if content contains "thinking" or "tool_use" types
+                content = msg.get("content", [])
+                msg_type = msg.get("type", "")
 
             # Skip system messages
             if role == "system":
                 return None
 
-            # Check if content contains "thinking" or "tool_use" types
-            content = msg.get("content", [])
+            # Skip messages based on type
+            if msg_type in [MessageType.REASONING, MessageType.PLUGIN_CALL, MessageType.PLUGIN_CALL_OUTPUT]:
+                return None
+
+            # Check if content contains "thinking" or "tool_use" types (for dict format)
             if isinstance(content, list):
                 should_skip = False
                 for item in content:
@@ -136,21 +153,30 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
                         if item_type in ["thinking", "tool_use"]:
                             should_skip = True
                             break
+                    elif hasattr(item, 'type'):  # Content object
+                        item_type = getattr(item, 'type', '')
+                        if item_type in ["thinking", "tool_use"]:
+                            should_skip = True
+                            break
                 if should_skip:
                     return None
 
             # Add timestamp to message for sorting later
-            timestamp_str = msg.get("timestamp", "")
-            try:
-                if isinstance(timestamp_str, str) and timestamp_str:
-                    # Parse timestamp - might be in ISO format
-                    parsed_timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00").replace("+00:00", ""))
-                    timestamp = ensure_tz_aware(parsed_timestamp)
-                else:
-                    # Use current time if no timestamp in message
+            # For Message objects, use timestamp attribute if available
+            if hasattr(msg, 'timestamp') and msg.timestamp:
+                timestamp = ensure_tz_aware(msg.timestamp)
+            else:
+                timestamp_str = getattr(msg, 'timestamp', '') or (msg.get("timestamp", "") if isinstance(msg, dict) else "")
+                try:
+                    if isinstance(timestamp_str, str) and timestamp_str:
+                        # Parse timestamp - might be in ISO format
+                        parsed_timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00").replace("+00:00", ""))
+                        timestamp = ensure_tz_aware(parsed_timestamp)
+                    else:
+                        # Use current time if no timestamp in message
+                        timestamp = ensure_tz_aware(default_time)
+                except:
                     timestamp = ensure_tz_aware(default_time)
-            except:
-                timestamp = ensure_tz_aware(default_time)
 
             return {
                 "message": msg,
@@ -167,7 +193,6 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
         processed_messages.sort(key=lambda x: x["timestamp"], reverse=True)
 
         logger.info(f"Processed session memory for session {session_id} and user {user_id}, filtered out messages containing thinking/tool_use/system roles")
-
         return processed_messages
 
     except Exception as e:
@@ -180,13 +205,6 @@ def load_json_safely(json_input) -> Optional[dict]:
     import logging
     logger = logging.getLogger(__name__)
 
-    # Handle if input is already a dictionary
-    if isinstance(json_input, dict):
-        return json_input
-
-    # Handle if input is not a string
-    if not isinstance(json_input, str):
-        json_input = str(json_input)
 
     # Try direct parsing first
     try:
@@ -253,7 +271,7 @@ def extract_content(content) -> str:
         return str(content)
 
 
-async def _read_chat_sessions_metadata(agent_workspace_path: str, workspace) -> List[dict]:
+async def _read_chat_sessions_metadata(workspace) -> List[dict]:
     """Read chat sessions metadata from chat manager.
 
     Args:
@@ -272,6 +290,7 @@ async def _read_chat_sessions_metadata(agent_workspace_path: str, workspace) -> 
     try:
         # Get all chats using chat_manager.list_chats()
         chats = await workspace.chat_manager.list_chats()
+        print("##########Chats:", chats)
 
         # Extract session info from chats
         for chat in chats:
@@ -295,12 +314,12 @@ async def _read_chat_sessions_metadata(agent_workspace_path: str, workspace) -> 
     return sessions_to_read
 
 
-def _filter_recent_sessions(sessions_to_read: List[dict], days: int = 3) -> List[dict]:
+def _filter_recent_sessions(sessions_to_read: List[dict], days: int = 7) -> List[dict]:
     """Filter sessions to only include recent ones or return most recent ones if none are recent.
 
     Args:
         sessions_to_read: List of session metadata
-        days: Number of days to look back (default 3)
+        days: Number of days to look back (default 7)
 
     Returns:
         Filtered list of sessions
@@ -312,27 +331,26 @@ def _filter_recent_sessions(sessions_to_read: List[dict], days: int = 3) -> List
 
     # Filter sessions based on time (last 3 days)
     filtered_sessions = []
-    three_days_ago = ensure_tz_aware(datetime.now()) - timedelta(days=days)
+    ts_date = ensure_tz_aware(datetime.now()) - timedelta(days=days)
 
     for session_info in sessions_to_read:
-        if session_info['mod_time'] >= three_days_ago:
+        if session_info['mod_time'] >= ts_date:
             filtered_sessions.append(session_info)
 
     # If no recent sessions, get the 3 most recently modified
     if not filtered_sessions:
         sessions_to_read.sort(key=lambda x: x['mod_time'], reverse=True)
-        filtered_sessions = sessions_to_read[:3]
+        filtered_sessions = sessions_to_read[:5]
     else:
         filtered_sessions.sort(key=lambda x: x['mod_time'], reverse=True)
 
     return filtered_sessions
 
 
-def _collect_session_messages(agent_workspace_path: str, filtered_sessions: List[dict], workspace) -> List[dict]:
+async def _collect_session_messages( filtered_sessions: List[dict], workspace) -> List[dict]:
     """Collect all messages from session memory using InMemoryMemory.
 
     Args:
-        agent_workspace_path: Path to the agent workspace (for backward compatibility)
         filtered_sessions: List of filtered session metadata
         workspace: Workspace instance to access session memory
 
@@ -352,7 +370,7 @@ def _collect_session_messages(agent_workspace_path: str, filtered_sessions: List
 
         try:
             # Pass the modification time from chats.json - returns list of messages
-            session_messages = _process_session_memory(session_id, user_id, workspace)
+            session_messages = await _process_session_memory(session_id, user_id, workspace)
             if session_messages:
                 all_messages.extend(session_messages)  # Extend instead of append
         except Exception as e:
@@ -379,31 +397,30 @@ def _format_session_messages(all_messages: List[dict], max_messages: int = 30, m
     # Sort messages by timestamp (descending - most recent first)
     all_messages.sort(key=lambda x: x["timestamp"], reverse=True)
 
+
     # Take only the most recent messages (max_messages)
     recent_messages = all_messages[:max_messages]
 
     # Format messages into context string
-    context_text = "[IN-MEMORY SESSION HISTORY]\n"
-    for msg_info in recent_messages:
-        msg_data = msg_info["message"]
-        role = msg_data.get("role", "unknown")
-        content = msg_data.get("content", "")
+    context_text = "\n"
+  
+    for msg_info in recent_messages[::-1]:
+        msg = msg_info["message"]
+        role = msg.role
 
-        # Format content appropriately
-        if isinstance(content, list):
-            content_text = " ".join([str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in content])
-        else:
-            content_text = str(content)
+        content_text = " ".join(
+            item.text for item in msg.content
+        ).strip()
+        
+        clean_text = content_text.replace('\n', ' ')
+        context_text += f"[{role}]: {clean_text}\n"
 
-        content_text = content_text.replace("\n", " ")
-        context_text += f"[{role}]: {content_text}\n"
 
-    context_text += "\n"
 
     # Truncate to max_chars if needed
     if len(context_text) > max_chars:
         context_text = context_text[:max_chars]
-
+    
     return context_text
 
 
@@ -423,7 +440,6 @@ async def get_last_message_ts(in_memory: Optional['ReMeInMemoryMemory'] = None):
         The timestamp of the last message from session or None if not found
     """
     import logging
-    from datetime import datetime
     logger = logging.getLogger(__name__)
 
     # First try getting the last message from in_memory

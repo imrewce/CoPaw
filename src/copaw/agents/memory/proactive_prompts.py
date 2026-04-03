@@ -30,6 +30,7 @@ Output ONLY a JSON object with this structure:
 Rules:  
 - Return 1 to 3 tasks, ordered by priority (frequency + recency).  
 - Do not use any tools in inference, answer directly based on context.
+- At least return 1 task as long as the contexts are not empty.
 - No extra text—only valid JSON.
 """
 
