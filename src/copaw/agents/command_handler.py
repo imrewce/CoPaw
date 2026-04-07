@@ -39,6 +39,7 @@ class ConversationCommandHandlerMixin:
             "dump_history",
             "load_history",
             "long_term_memory",
+            "proactive",
         },
     )
 
@@ -494,6 +495,152 @@ class CommandHandler(ConversationCommandHandlerMixin):
         return await self._make_system_msg(
             f"**Long-Term Memory**\n\n{long_term_memory}",
         )
+
+    async def _process_proactive(
+    self,
+    _messages: list[Msg],
+    args: str = "",
+    ) -> Msg:
+        """
+        Process /proactive command to manage proactive conversation feature.
+
+        Args:
+            _messages: List of messages in memory (not used for this command)
+            args: Command arguments ('on', 'off', 'status', or minutes value)
+
+        Returns:
+            System message with the result of the proactive command
+        """
+        args = args.strip().lower()
+
+        if not args or args == "on":
+            # Enable with default 30 minutes if no argument or 'on' is specified
+            try:
+                from .memory import enable_proactive_for_session
+                result = enable_proactive_for_session(
+                    self.agent_name,
+                    30,
+                    memory_manager=self.memory_manager,
+                    in_memory=self.memory
+                )
+                return await self._make_system_msg(
+                    f"**Proactive Mode Enabled**\n\n"
+                    f"- Idle time: 30 minutes\n"
+                    f"- Status: {result}\n"
+                    f"- Proactive messages will be sent after 30 minutes of inactivity"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    f"**Error Enabling Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
+
+        elif args == "off":
+            # Disable proactive mode - call the cleanup function
+            try:
+                from .memory import proactive_trigger_loop
+                # We need to find a way to cancel the proactive task for this session
+                # Since we don't have reset_proactive_session, let's cancel the proactive task directly
+                import asyncio
+                from .memory import proactive_tasks
+
+                if self.agent_name in proactive_tasks:
+                    task = proactive_tasks[self.agent_name]
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    del proactive_tasks[self.agent_name]
+
+                return await self._make_system_msg(
+                    f"**Proactive Mode Disabled**\n\n"
+                    f"- Proactive monitoring has been stopped\n"
+                    f"- No more proactive messages will be sent"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    f"**Error Disabling Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
+
+        elif args == "status":
+            # Show current proactive status
+            try:
+                from .memory import proactive_configs
+                if self.agent_name in proactive_configs:
+                    config = proactive_configs[self.agent_name]
+                    if config.enabled:
+                        status = "ENABLED"
+                        idle_time = config.idle_minutes
+                        last_interaction = config.last_user_interaction.strftime("%Y-%m-%d %H:%M:%S") if config.last_user_interaction else "UNKNOWN"
+                        last_proactive = config.last_proactive_sent.strftime("%Y-%m-%d %H:%M:%S") if config.last_proactive_sent else "NEVER"
+                        return await self._make_system_msg(
+                            f"**Proactive Mode Status**\n\n"
+                            f"- Status: {status}\n"
+                            f"- Idle Time: {idle_time} minutes\n"
+                            f"- Last Interaction: {last_interaction}\n"
+                            f"- Last Proactive Sent: {last_proactive}"
+                        )
+                    else:
+                        return await self._make_system_msg(
+                            f"**Proactive Mode Status**\n\n"
+                            f"- Status: DISABLED\n"
+                            f"- Proactive monitoring is not active"
+                        )
+                else:
+                    return await self._make_system_msg(
+                        f"**Proactive Mode Status**\n\n"
+                        f"- Status: DISABLED\n"
+                        f"- Proactive monitoring is not active"
+                    )
+            except Exception as e:
+                return await self._make_system_msg(
+                    f"**Error Checking Proactive Status**\n\n"
+                    f"- Error: {str(e)}"
+                )
+
+        else:
+            # Custom idle time in minutes
+            try:
+                minutes = int(args)
+                if minutes <= 0:
+                    return await self._make_system_msg(
+                        f"**Invalid Minutes Value**\n\n"
+                        f"- Value must be a positive integer\n"
+                        f"- Example: /proactive 45 (for 45 minutes)"
+                    )
+
+                from .memory import enable_proactive_for_session
+                result = enable_proactive_for_session(
+                    self.agent_name,
+                    minutes,
+                    memory_manager=self.memory_manager,
+                    in_memory=self.memory
+                )
+                return await self._make_system_msg(
+                    f"**Proactive Mode Enabled**\n\n"
+                    f"- Idle time: {minutes} minutes\n"
+                    f"- Status: {result}\n"
+                    f"- Proactive messages will be sent after {minutes} minutes of inactivity"
+                )
+            except ValueError:
+                return await self._make_system_msg(
+                    f"**Invalid Command Format**\n\n"
+                    f"- Usage: /proactive [minutes|on|off|status]\n"
+                    f"- Examples:\n"
+                    f"  • /proactive (default 30 minutes)\n"
+                    f"  • /proactive 45 (45 minutes idle time)\n"
+                    f"  • /proactive on (default 30 minutes)\n"
+                    f"  • /proactive off (disable proactive mode)\n"
+                    f"  • /proactive status (show current status)"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    f"**Error Configuring Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
 
     async def handle_conversation_command(self, query: str) -> Msg:
         """Process conversation system commands.
