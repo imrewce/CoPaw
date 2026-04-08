@@ -174,16 +174,25 @@ async def proactive_trigger_loop(session_id: str) -> None:
                 # Ensure both datetimes are timezone-aware for comparison
                 last_interaction_tz_aware = ensure_tz_aware(last_interaction_dt)
                 current_time = datetime.now(timezone.utc)
-                elapsed_minutes = (current_time - last_interaction_tz_aware).total_seconds() / 60.0
+                elapsed_minutes = (
+                    current_time - last_interaction_tz_aware
+                ).total_seconds() / 60.0
 
                 # Additional check: ensure that the time since proactive mode was enabled
                 # is at least the configured idle time for the first trigger
                 if config.mode_enabled_time:
                     # Ensure both datetimes are timezone-aware for comparison
-                    mode_enabled_time_tz_aware = ensure_tz_aware(config.mode_enabled_time)
+                    mode_enabled_time_tz_aware = ensure_tz_aware(
+                        config.mode_enabled_time
+                    )
                     current_time = datetime.now(timezone.utc)
-                    time_since_mode_enabled = (current_time - mode_enabled_time_tz_aware).total_seconds() / 60.0
-                    should_trigger = elapsed_minutes >= config.idle_minutes and time_since_mode_enabled >= config.idle_minutes
+                    time_since_mode_enabled = (
+                        current_time - mode_enabled_time_tz_aware
+                    ).total_seconds() / 60.0
+                    should_trigger = (
+                        elapsed_minutes >= config.idle_minutes and
+                        time_since_mode_enabled >= config.idle_minutes
+                    )
                 else:
                     # Fallback to original logic if mode_enabled_time is not set
                     should_trigger = elapsed_minutes >= config.idle_minutes
@@ -206,10 +215,10 @@ async def proactive_trigger_loop(session_id: str) -> None:
                             last_interaction_tz_aware <= mode_enabled_time_tz_aware
                         )
 
-
                         # Double-check: is the last message already proactive?
                         # Skip this check if the last interaction was before proactive mode was enabled
-                        if last_interaction_was_before_mode_enabled or not await is_last_message_proactive():
+                        if (last_interaction_was_before_mode_enabled or
+                                not await is_last_message_proactive()):
                             logger.info("Triggering proactive response now")
                             # Mark that we're attempting to trigger proactive response
                             last_trigger_attempt = datetime.now(timezone.utc)

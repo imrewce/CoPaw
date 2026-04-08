@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """Prompt templates for proactive conversation feature."""
 
-PROACTIVE_TASK_EXTRACTION_PROMPT = """
+PROACTIVE_TASK_EXTRACTION_PROMPT = """\
 You are given the user's recent session contexts and current screen content (if provided) in a reversed order.
 
-Your job:  
-1. Find 1–3 likely high-level goals the user requests (prioritize those mentioned repeatedly or recently).  
-2. For each goal, create one **new, concrete query** that helps the user move forward—**not** a repeat of past commands or searches.  
+Your job:
+1. Find 1–3 likely high-level goals the user requests (prioritize those mentioned repeatedly or recently).
+2. For each goal, create one **new, concrete query** that helps the user move forward—**not** a repeat of past commands or searches.
 
-A good goal:  
-- Based only on user request or user messages in the provided memory.  
+A good goal:
+- Based only on user request or user messages in the provided memory.
 
-A good query:  
-- Specific, actionable, and tool-friendly (e.g., a search or request).  
+A good query:
+- Specific, actionable, and tool-friendly (e.g., a search or request).
 - Addresses missing info the user likely needs *now*, and queries for the newest information.
-- Avoids duplicating anything already in context, or similar to previous [PROACTIVE] labeled messages. 
+- Avoids duplicating anything already in context, or similar to previous [PROACTIVE] labeled messages.
 
 Output ONLY a JSON object with this structure:
 {
@@ -27,8 +27,8 @@ Output ONLY a JSON object with this structure:
   ]
 }
 
-Rules:  
-- Return 1 to 3 tasks, ordered by priority (frequency + recency).  
+Rules:
+- Return 1 to 3 tasks, ordered by priority (frequency + recency).
 - Do not use any tools in inference, answer directly based on context.
 - At least return 1 task as long as the contexts are not empty.
 - No extra text—only valid JSON.

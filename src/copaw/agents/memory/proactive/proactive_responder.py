@@ -30,6 +30,19 @@ from ...tools import (
     desktop_screenshot
 )
 
+# Move the imports that were flagged as wrong position to the top
+from ....app.multi_agent_manager import MultiAgentManager
+from ....app.agent_context import get_current_agent_id
+from ...react_agent import CoPawAgent
+from ....config.config import load_agent_config
+from ....app.runner.utils import build_env_context
+from agentscope.tool import Toolkit
+from agentscope.memory import InMemoryMemory
+from ....app.runner.utils import agentscope_msg_to_message
+import re
+import aiohttp
+import asyncio
+
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +139,7 @@ async def _initialize_single_proactive_agent(session_id: str, workspace, agent_i
 
     # Load agent configuration
     agent_config = load_agent_config(agent_id)
-    agent_config.running.max_iters = 30
+    agent_config.running.max_iters = 50
 
     # Create environment context
     env_context = build_env_context(
@@ -140,7 +153,8 @@ async def _initialize_single_proactive_agent(session_id: str, workspace, agent_i
     agent = CoPawAgent(
         agent_config=agent_config,
         env_context=env_context,
-        mcp_clients=await workspace.mcp_manager.get_clients() if workspace.mcp_manager else [],
+        mcp_clients=await workspace.mcp_manager.get_clients()
+            if workspace.mcp_manager else [],
         memory_manager=workspace.memory_manager,
         request_context={
             "session_id": session_id,
@@ -234,10 +248,14 @@ async def _execute_query(query: str, agent) -> ProactiveQueryResult:
         name="User",
         role="user",
         content = f"""Task: Answer: {query} using tools --
-                    `browser_use` primary, `execute_shell_command`/`read_file` only if essential.
-                    Self-check: Did you retrieve new, query-relevant data or complete given task?
-                    Output: Query answer and end strictly with `[SUCCESS]` (yes) or `[FAILURE]` (no).
-                    ⚠️ CRITICAL: The flag MUST be the absolute last token. No trailing text."""
+                    `browser_use` primary, `execute_shell_command`/`read_file`
+                    only if essential.
+                    Self-check: Did you retrieve new, query-relevant data or
+                    complete given task?
+                    Output: Query answer and end strictly with `[SUCCESS]`
+                    (yes) or `[FAILURE]` (no).
+                    ⚠️ CRITICAL: The flag MUST be the absolute last token.
+                    No trailing text."""
     ))
 
     success = False
@@ -259,7 +277,7 @@ async def _execute_query(query: str, agent) -> ProactiveQueryResult:
 
 async def _generate_final_message(
     result: ProactiveQueryResult, agent
-) -> Optional[str]:
+) -> Optional[Msg]:
     """Generate the final proactive message for the user."""
     # Prepare gathered info from successful queries
     gathered_info = ""
@@ -275,17 +293,26 @@ async def _generate_final_message(
     )
 
     # Import required modules from agent_context
-    from ....app.agent_context import get_current_agent_id
-
     # Get the current active agent ID
     active_agent_id = get_current_agent_id()
 
     # Send the proactive message using async HTTP request instead of subprocess
-    return await send_proactive_message_via_http(
+    proactive_msg_content = await send_proactive_message_via_http(
         active_agent_id=active_agent_id,
         proactive_content=proactive_content,
         timeout_seconds=300
     )
+
+    if proactive_msg_content:
+        # Create and return the proactive message
+        return Msg(
+            name="Proactive_Assistant",
+            role="assistant",
+            content=f"[PROACTIVE] {proactive_msg_content}",
+            timestamp=datetime.now()  # Fixed: renamed from datetime to avoid redefining
+        )
+
+    return None
 
 
 async def send_proactive_message_via_http(
@@ -304,7 +331,8 @@ async def send_proactive_message_via_http(
 
     # Construct request payload similar to what CLI does
     request_payload = {
-        "session_id": f"proactive:{active_agent_id}:{int(asyncio.get_event_loop().time() * 1000)}", # Simple session ID
+        "session_id": f"proactive:{active_agent_id}:"
+                      f"{int(asyncio.get_event_loop().time() * 1000)}",  # Simple session ID
         "input": [
             {
                 "role": "user",
@@ -349,7 +377,9 @@ async def send_proactive_message_via_http(
                     logger.warning("No valid SSE data received from agent")
 
     except asyncio.TimeoutError:
-        logger.error(f"Timeout ({timeout_seconds}s) calling CoPaw API for proactive message")
+        logger.error(
+            f"Timeout ({timeout_seconds}s) calling CoPaw API for proactive message"
+        )
     except Exception as e:
         logger.error(f"Error calling CoPaw API for proactive message: {e}")
 

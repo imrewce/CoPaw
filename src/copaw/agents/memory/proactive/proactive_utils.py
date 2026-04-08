@@ -6,7 +6,7 @@ Kept self-contained within the CoPaw agents/memory directory.
 
 import json
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from reme.memory.file_based import ReMeInMemoryMemory
@@ -127,7 +127,6 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
 
         # Get memory messages
         messages = await memory.get_memory()
-        
 
         # Convert to serializable format
         serializable_messages = agentscope_msg_to_message(messages)
@@ -159,7 +158,8 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
                 return None
 
             # Skip messages based on type
-            if msg_type in [MessageType.REASONING, MessageType.PLUGIN_CALL, MessageType.PLUGIN_CALL_OUTPUT]:
+            if msg_type in [MessageType.REASONING, MessageType.PLUGIN_CALL,
+                            MessageType.PLUGIN_CALL_OUTPUT]:
                 return None
 
             # Check if content contains "thinking" or "tool_use" types (for dict format)
@@ -306,7 +306,6 @@ async def _analyze_screen_activity(agent) -> Optional[str]:
     """
     from agentscope.message import Msg
     from ...tools.desktop_screenshot import desktop_screenshot
-    import json as json_mod
     logger = logging.getLogger(__name__)
 
     try:
@@ -325,7 +324,7 @@ async def _analyze_screen_activity(agent) -> Optional[str]:
 
 
             try:
-                result_json = json_mod.loads(result_text)
+                result_json = json.loads(result_text)
                 if result_json.get("ok", True):
                     screenshot_path = result_json.get("path", "")
 
@@ -363,11 +362,11 @@ async def _analyze_screen_activity(agent) -> Optional[str]:
                     )
                     
                 else:
-                    logging.getLogger(__name__).warning(f"Screenshot failed: {result_json.get('error', 'Unknown error')}")
-            except json_mod.JSONDecodeError:
-                logging.getLogger(__name__).warning("Could not parse screenshot result as JSON")
+                    logger.warning(f"Screenshot failed: {result_json.get('error', 'Unknown error')}")
+            except json.JSONDecodeError:
+                logger.warning("Could not parse screenshot result as JSON")
     except Exception as e:
-        logging.getLogger(__name__).warning(f"Could not capture screen for analysis: {e}")
+        logger.warning(f"Could not capture screen for analysis: {e}")
 
     return None
 

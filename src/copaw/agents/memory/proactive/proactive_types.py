@@ -21,7 +21,7 @@ class ProactiveConfig:
     idle_minutes: int = 30
     last_user_interaction: Optional[datetime] = None
     running_task_id: Optional[str] = None
-    mode_enabled_time: Optional[datetime] = None  # Time when proactive mode was enabled
+    mode_enabled_time: Optional[datetime] = None  
 
 
 @dataclass
@@ -47,4 +47,4 @@ class ProactiveMemoryContext:
     """Memory context for proactive agent."""
     session_context: str
     file_memories: list[str]
-    max_chars: int = 100000  # Default max context length
+    max_chars: int = 100000  
