@@ -5,10 +5,14 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Optional, Any, TYPE_CHECKING
+
+from agentscope.message import Msg
+
+from ....app.agent_context import get_current_agent_id
+from ....app.multi_agent_manager import MultiAgentManager
 from .proactive_types import ProactiveConfig
 from .proactive_responder import generate_proactive_response
 from .proactive_utils import get_last_message_ts
-from agentscope.message import Msg
 
 if TYPE_CHECKING:
     from ..reme_light_memory_manager import ReMeLightMemoryManager
@@ -33,10 +37,6 @@ proactive_responder_tasks: Dict[str, asyncio.Task] = {}  # Track active responde
 
 # Store session references globally so they can be accessed during proactive trigger
 session_references: Dict[str, Dict[str, Any]] = {}
-
-# Import the active agent monitoring utilities
-from ....app.agent_context import get_current_agent_id
-from ....app.multi_agent_manager import MultiAgentManager
 
 
 def enable_proactive_for_session(

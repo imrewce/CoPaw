@@ -4,11 +4,12 @@ Utility functions for proactive messaging features.
 Kept self-contained within the CoPaw agents/memory directory.
 """
 
-from typing import List,  Optional
-from datetime import  timezone
 import json
-from reme.memory.file_based import ReMeInMemoryMemory
 import logging
+from datetime import timezone
+from typing import List, Optional
+
+from reme.memory.file_based import ReMeInMemoryMemory
 
 
 def ensure_tz_aware(dt):
@@ -81,7 +82,9 @@ async def build_proactive_memory_context(
     # Format messages into context string
     session_context = ""
     if all_messages:
-        session_context = _format_session_messages(all_messages, max_session_messages, max_session_chars)
+        session_context = _format_session_messages(
+            all_messages, max_session_messages, max_session_chars
+        )
 
     if session_context:
         combined_context += session_context + "\n\n"
@@ -181,16 +184,20 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
             if hasattr(msg, 'timestamp') and msg.timestamp:
                 timestamp = ensure_tz_aware(msg.timestamp)
             else:
-                timestamp_str = getattr(msg, 'timestamp', '') or (msg.get("timestamp", "") if isinstance(msg, dict) else "")
+                timestamp_str = (
+                    getattr(msg, 'timestamp', '') or
+                    (msg.get("timestamp", "") if isinstance(msg, dict) else "")
+                )
                 try:
                     if isinstance(timestamp_str, str) and timestamp_str:
                         # Parse timestamp - might be in ISO format
-                        parsed_timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00").replace("+00:00", ""))
+                        timestamp_formatted = timestamp_str.replace("Z", "+00:00").replace("+00:00", "")
+                        parsed_timestamp = datetime.fromisoformat(timestamp_formatted)
                         timestamp = ensure_tz_aware(parsed_timestamp)
                     else:
                         # Use current time if no timestamp in message
                         timestamp = ensure_tz_aware(default_time)
-                except:
+                except Exception:
                     timestamp = ensure_tz_aware(default_time)
 
             return {
@@ -207,7 +214,10 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
         # Sort messages by timestamp (descending - most recent first)
         processed_messages.sort(key=lambda x: x["timestamp"], reverse=True)
 
-        logger.info(f"Processed session memory for session {session_id} and user {user_id}, filtered out messages containing thinking/tool_use/system roles")
+        logger.info(
+            f"Processed session memory for session {session_id} and user {user_id}, "
+            "filtered out messages containing thinking/tool_use/system roles"
+        )
         return processed_messages
 
     except Exception as e:
@@ -321,7 +331,10 @@ async def _analyze_screen_activity(agent) -> Optional[str]:
 
 
                         # Create a message asking the agent to analyze the screenshot
-                    analysis_prompt = f"Analyze this screenshot of the user's desktop. Identify what application or activity the user is currently engaged in."
+                    analysis_prompt = (
+                        "Analyze this screenshot of the user's desktop. "
+                        "Identify what application or activity the user is currently engaged in."
+                    )
 
                     # Create a message with the image block
                     screenshot_msg = Msg(
@@ -340,10 +353,14 @@ async def _analyze_screen_activity(agent) -> Optional[str]:
                     response = await agent.reply(screenshot_msg)
 
                     # Extract the analysis result from the agent's response using extract_content helper
-                    analysis_result = extract_content(response.content) if response and hasattr(response, 'content') and response.content else ""
+                    has_valid_response = response and hasattr(response, 'content') and response.content
+                    analysis_result = extract_content(response.content) if has_valid_response else ""
 
                     # Format and return screen analysis context
-                    return f"[SCREEN ANALYSIS]\nAnalysis of user's current desktop activity:\n{analysis_result.strip()}\n\n[SCREEN CONTEXT END]\n\n"
+                    return (
+                        f"[SCREEN ANALYSIS]\nAnalysis of user's current desktop activity:\n"
+                        f"{analysis_result.strip()}\n\n[SCREEN CONTEXT END]\n\n"
+                    )
                     
                 else:
                     logging.getLogger(__name__).warning(f"Screenshot failed: {result_json.get('error', 'Unknown error')}")
@@ -383,8 +400,9 @@ async def _read_chat_sessions_metadata(workspace) -> List[dict]:
             updated_at_dt = chat.updated_at
             updated_at_dt = ensure_tz_aware(updated_at_dt)
 
+            filename = f"{user_id.replace(':', '--')}_{session_id.replace(':', '--')}.json"  # Kept for backward compatibility
             sessions_to_read.append({
-                'filename': f"{user_id.replace(':', '--')}_{session_id.replace(':', '--')}.json",  # Kept for backward compatibility
+                'filename': filename,
                 'user_id': user_id,
                 'session_id': session_id,
                 'mod_time': updated_at_dt
@@ -407,8 +425,6 @@ def _filter_recent_sessions(sessions_to_read: List[dict], days: int = 7) -> List
         Filtered list of sessions
     """
     from datetime import datetime, timedelta
-
-    logger = logging.getLogger(__name__)
 
     # Filter sessions based on time (last 3 days)
     filtered_sessions = []
@@ -459,7 +475,9 @@ async def _collect_session_messages( filtered_sessions: List[dict], workspace) -
     return all_messages
 
 
-def _format_session_messages(all_messages: List[dict], max_messages: int = 50, max_chars: int = 50000) -> str:
+def _format_session_messages(
+    all_messages: List[dict], max_messages: int = 50, max_chars: int = 50000
+) -> str:
     """Format collected session messages into a context string.
 
     Args:
@@ -470,8 +488,6 @@ def _format_session_messages(all_messages: List[dict], max_messages: int = 50, m
     Returns:
         Formatted context string
     """
-
-    logger = logging.getLogger(__name__)
 
     # Sort messages by timestamp (descending - most recent first)
     all_messages.sort(key=lambda x: x["timestamp"], reverse=True)

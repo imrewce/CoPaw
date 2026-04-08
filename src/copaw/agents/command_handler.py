@@ -520,7 +520,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 result = enable_proactive_for_session(
                     self.agent_name,
                     30,
-                    memory_manager=self.memory_manager,
+                    memory_manager=self.memory_manager,  # type: ignore[arg-type]
                     in_memory=self.memory
                 )
                 return await self._make_system_msg(
@@ -557,7 +557,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 return await self._make_system_msg(
                     f"**Proactive Mode Disabled**\n\n"
                     f"- Proactive monitoring has been stopped\n"
-                    f"- No more proactive messages will be sent"
+                    "- No more proactive messages will be sent"
                 )
             except Exception as e:
                 return await self._make_system_msg(
@@ -574,8 +574,12 @@ class CommandHandler(ConversationCommandHandlerMixin):
                     if config.enabled:
                         status = "ENABLED"
                         idle_time = config.idle_minutes
-                        last_interaction = config.last_user_interaction.strftime("%Y-%m-%d %H:%M:%S") if config.last_user_interaction else "UNKNOWN"
-                        last_proactive = config.last_proactive_sent.strftime("%Y-%m-%d %H:%M:%S") if config.last_proactive_sent else "NEVER"
+                        last_interaction = config.last_user_interaction.strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ) if config.last_user_interaction else "UNKNOWN"
+                        last_proactive = config.last_proactive_sent.strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ) if config.last_proactive_sent else "NEVER"
                         return await self._make_system_msg(
                             f"**Proactive Mode Status**\n\n"
                             f"- Status: {status}\n"
@@ -597,7 +601,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                     )
             except Exception as e:
                 return await self._make_system_msg(
-                    f"**Error Checking Proactive Status**\n\n"
+                    "**Error Checking Proactive Status**\n\n"
                     f"- Error: {str(e)}"
                 )
 
@@ -607,16 +611,16 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 minutes = int(args)
                 if minutes <= 0:
                     return await self._make_system_msg(
-                        f"**Invalid Minutes Value**\n\n"
-                        f"- Value must be a positive integer\n"
-                        f"- Example: /proactive 45 (for 45 minutes)"
+                        "**Invalid Minutes Value**\n\n"
+                        "- Value must be a positive integer\n"
+                        "- Example: /proactive 45 (for 45 minutes)"
                     )
 
                 from .memory import enable_proactive_for_session
                 result = enable_proactive_for_session(
                     self.agent_name,
                     minutes,
-                    memory_manager=self.memory_manager,
+                    memory_manager=self.memory_manager,  # type: ignore[arg-type]
                     in_memory=self.memory
                 )
                 return await self._make_system_msg(
@@ -638,7 +642,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 )
             except Exception as e:
                 return await self._make_system_msg(
-                    f"**Error Configuring Proactive Mode**\n\n"
+                    "**Error Configuring Proactive Mode**\n\n"
                     f"- Error: {str(e)}"
                 )
 
