@@ -341,7 +341,6 @@ async def _analyze_screen_activity(agent) -> Optional[str]:
 
                     # Extract the analysis result from the agent's response using extract_content helper
                     analysis_result = extract_content(response.content) if response and hasattr(response, 'content') and response.content else ""
-                    logger.info(f"screen analysis result: {analysis_result}")
 
                     # Format and return screen analysis context
                     return f"[SCREEN ANALYSIS]\nAnalysis of user's current desktop activity:\n{analysis_result.strip()}\n\n[SCREEN CONTEXT END]\n\n"
