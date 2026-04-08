@@ -2,7 +2,7 @@
 """Prompt templates for proactive conversation feature."""
 
 PROACTIVE_TASK_EXTRACTION_PROMPT = """
-You are given the user's recent session contexts in a reversed order.
+You are given the user's recent session contexts and current screen content (if provided) in a reversed order.
 
 Your job:  
 1. Find 1–3 likely high-level goals the user requests (prioritize those mentioned repeatedly or recently).  

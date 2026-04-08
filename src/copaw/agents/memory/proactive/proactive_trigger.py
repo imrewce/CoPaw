@@ -165,14 +165,15 @@ async def proactive_trigger_loop(session_id: str) -> None:
 
             # If we can't get the actual time from session, fall back to config
             if actual_last_user_time is not None:
-                last_interaction_dt = datetime.fromtimestamp(actual_last_user_time)
+                # Fix: Always use UTC when converting timestamp to ensure consistent timezone handling
+                last_interaction_dt = datetime.fromtimestamp(actual_last_user_time, tz=timezone.utc)
             else:
                 last_interaction_dt = config.last_user_interaction
 
             if last_interaction_dt is not None:
                 # Ensure both datetimes are timezone-aware for comparison
                 last_interaction_tz_aware = ensure_tz_aware(last_interaction_dt)
-                current_time = ensure_tz_aware(datetime.now())
+                current_time = datetime.now(timezone.utc)
                 elapsed_minutes = (current_time - last_interaction_tz_aware).total_seconds() / 60.0
 
                 # Additional check: ensure that the time since proactive mode was enabled
@@ -180,7 +181,7 @@ async def proactive_trigger_loop(session_id: str) -> None:
                 if config.mode_enabled_time:
                     # Ensure both datetimes are timezone-aware for comparison
                     mode_enabled_time_tz_aware = ensure_tz_aware(config.mode_enabled_time)
-                    current_time = ensure_tz_aware(datetime.now())
+                    current_time = datetime.now(timezone.utc)
                     time_since_mode_enabled = (current_time - mode_enabled_time_tz_aware).total_seconds() / 60.0
                     should_trigger = elapsed_minutes >= config.idle_minutes and time_since_mode_enabled >= config.idle_minutes
                 else:
@@ -197,22 +198,24 @@ async def proactive_trigger_loop(session_id: str) -> None:
 
                     if (config.running_task_id is None and  # No proactive task currently running
                         (last_trigger_attempt is None or
-                         (ensure_tz_aware(datetime.now()) - ensure_tz_aware(last_trigger_attempt)).total_seconds() > 120)):  # At least 2 min cooldown from last attempt
+                         (datetime.now(timezone.utc) - ensure_tz_aware(last_trigger_attempt)).total_seconds() > 120)):  # At least 2 min cooldown from last attempt
 
                         # Check if the last user interaction was before the proactive mode was enabled
                         # If so, skip the proactive message check to prevent blocking new triggers
                         last_interaction_was_before_mode_enabled = (
-                            last_interaction_tz_aware < mode_enabled_time_tz_aware
+                            last_interaction_tz_aware <= mode_enabled_time_tz_aware
                         )
+
 
                         # Double-check: is the last message already proactive?
                         # Skip this check if the last interaction was before proactive mode was enabled
                         if last_interaction_was_before_mode_enabled or not await is_last_message_proactive():
+                            logger.info("Triggering proactive response now")
                             # Mark that we're attempting to trigger proactive response
-                            last_trigger_attempt = datetime.now()
+                            last_trigger_attempt = datetime.now(timezone.utc)
 
                             # Trigger proactive response
-                            config.running_task_id = f"proactive_{datetime.now().timestamp()}"
+                            config.running_task_id = f"proactive_{datetime.now(timezone.utc).timestamp()}"
 
                             # Get session references passed through enable_proactive_for_session function
                             # We need to access them from a different mechanism since they're not directly available here
@@ -252,7 +255,7 @@ async def proactive_trigger_loop(session_id: str) -> None:
                                     # Update last proactive sent time to prevent immediate re-triggering
                         else:
                             # Update the trigger attempt time even if we skip triggering due to proactive message check
-                            last_trigger_attempt = ensure_tz_aware(datetime.now())
+                            last_trigger_attempt = datetime.now(timezone.utc)
         except asyncio.CancelledError:
             logger.info(f"Proactive trigger loop cancelled for session {session_id}")
             break

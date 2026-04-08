@@ -8,6 +8,7 @@ from typing import List,  Optional
 from datetime import  timezone
 import json
 from reme.memory.file_based import ReMeInMemoryMemory
+import logging
 
 
 def ensure_tz_aware(dt):
@@ -19,11 +20,13 @@ def ensure_tz_aware(dt):
 
 
 
+
 async def build_proactive_memory_context(
     agent_workspace_path: Optional[str] = None,
     max_session_messages: int = 30,
     max_session_chars: int = 12500,
-    workspace = None
+    workspace = None,
+    agent = None
 ) -> str:
     """Build a combined memory context for proactive agent from active agent workspace.
 
@@ -32,14 +35,27 @@ async def build_proactive_memory_context(
         max_session_messages: Maximum number of recent messages to include from sessions (default 30)
         max_session_chars: Maximum character length for the session context (default 12500)
         workspace: Workspace instance to access chat manager and session memory
+        agent: Agent instance to use for analyzing screenshots (optional)
     """
-    import logging
+
 
     # agent_workspace_path must be provided - no fallback to WORKING_DIR
     if agent_workspace_path is None:
         raise ValueError("agent_workspace_path must be provided and cannot be None")
 
-    combined_context = "[SESSION CONTEXT]\n"
+    # Check if the model supports multimodal input to decide if we should analyze the screen
+    from ...prompt import get_active_model_supports_multimodal
+
+    combined_context = ""
+
+    # Capture screen and analyze user activity if model supports multimodal and agent is provided
+    if agent and get_active_model_supports_multimodal():
+        screen_analysis = await _analyze_screen_activity(agent)
+        if screen_analysis:
+            combined_context += "[SCREEN CONTEXT]\n"
+            combined_context += screen_analysis
+
+    combined_context += "[SESSION CONTEXT]\n"
 
     # Get workspace reference if not provided
     if workspace is None:
@@ -53,7 +69,7 @@ async def build_proactive_memory_context(
     sessions_to_read = await _read_chat_sessions_metadata(workspace)
 
     if not sessions_to_read:
-        return ""
+        return combined_context if combined_context != "[SESSION CONTEXT]\n" else ""
 
     # Filter to recent sessions
     filtered_sessions = _filter_recent_sessions(sessions_to_read)
@@ -84,7 +100,6 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
     Returns:
         List of messages with timestamps
     """
-    import logging
     from datetime import datetime
     from agentscope.memory import InMemoryMemory
     from ....app.runner.utils import agentscope_msg_to_message
@@ -202,7 +217,6 @@ async def _process_session_memory(session_id: str, user_id: str, workspace) -> L
 
 def load_json_safely(json_input) -> Optional[dict]:
     """Safely parse JSON string, returning None if invalid."""
-    import logging
     logger = logging.getLogger(__name__)
 
 
@@ -271,6 +285,77 @@ def extract_content(content) -> str:
         return str(content)
 
 
+async def _analyze_screen_activity(agent) -> Optional[str]:
+    """Analyze user's screen activity using multimodal capabilities.
+
+    Args:
+        agent: Agent instance to use for analyzing screenshots
+
+    Returns:
+        String containing screen analysis context, or None if analysis fails
+    """
+    from agentscope.message import Msg
+    from ...tools.desktop_screenshot import desktop_screenshot
+    import json as json_mod
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Capture screenshot
+        screenshot_result = await desktop_screenshot()
+        logger.info("screen captured successfully")
+  
+
+        if screenshot_result and hasattr(screenshot_result, 'content') and screenshot_result.content:
+            # Extract the path from the result
+            content = screenshot_result.content
+            # Handle both direct content and list of content
+     
+       
+            result_text = content[0]['text']
+
+
+            try:
+                result_json = json_mod.loads(result_text)
+                if result_json.get("ok", True):
+                    screenshot_path = result_json.get("path", "")
+
+
+                        # Create a message asking the agent to analyze the screenshot
+                    analysis_prompt = f"Analyze this screenshot of the user's desktop. Identify what application or activity the user is currently engaged in."
+
+                    # Create a message with the image block
+                    screenshot_msg = Msg(
+                        name="System",
+                        role="user",
+                        content=[
+                            {"type": "text", "text": analysis_prompt},
+                            {
+                                "type": "image",
+                                "source": {"type": "url", "url": screenshot_path}
+                            }
+                        ]
+                    )
+
+                    # Use the agent to analyze the screenshot
+                    response = await agent.reply(screenshot_msg)
+
+                    # Extract the analysis result from the agent's response using extract_content helper
+                    analysis_result = extract_content(response.content) if response and hasattr(response, 'content') and response.content else ""
+                    logger.info(f"screen analysis result: {analysis_result}")
+
+                    # Format and return screen analysis context
+                    return f"[SCREEN ANALYSIS]\nAnalysis of user's current desktop activity:\n{analysis_result.strip()}\n\n[SCREEN CONTEXT END]\n\n"
+                    
+                else:
+                    logging.getLogger(__name__).warning(f"Screenshot failed: {result_json.get('error', 'Unknown error')}")
+            except json_mod.JSONDecodeError:
+                logging.getLogger(__name__).warning("Could not parse screenshot result as JSON")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Could not capture screen for analysis: {e}")
+
+    return None
+
+
 async def _read_chat_sessions_metadata(workspace) -> List[dict]:
     """Read chat sessions metadata from chat manager.
 
@@ -281,8 +366,7 @@ async def _read_chat_sessions_metadata(workspace) -> List[dict]:
     Returns:
         List of session metadata dictionaries
     """
-    import logging
-    from datetime import datetime
+
     logger = logging.getLogger(__name__)
 
     sessions_to_read = []
@@ -324,7 +408,6 @@ def _filter_recent_sessions(sessions_to_read: List[dict], days: int = 7) -> List
         Filtered list of sessions
     """
     from datetime import datetime, timedelta
-    import logging
 
     logger = logging.getLogger(__name__)
 
@@ -337,7 +420,7 @@ def _filter_recent_sessions(sessions_to_read: List[dict], days: int = 7) -> List
             filtered_sessions.append(session_info)
 
     # If no recent sessions, get the 3 most recently modified
-    if len[filtered_sessions]<5:
+    if len(filtered_sessions) < 5:
         sessions_to_read.sort(key=lambda x: x['mod_time'], reverse=True)
         filtered_sessions = sessions_to_read[:5]
     else:
@@ -356,7 +439,6 @@ async def _collect_session_messages( filtered_sessions: List[dict], workspace) -
     Returns:
         List of messages with timestamps
     """
-    import logging
 
     logger = logging.getLogger(__name__)
 
@@ -378,18 +460,17 @@ async def _collect_session_messages( filtered_sessions: List[dict], workspace) -
     return all_messages
 
 
-def _format_session_messages(all_messages: List[dict], max_messages: int = 50, max_chars: int = 12500) -> str:
+def _format_session_messages(all_messages: List[dict], max_messages: int = 50, max_chars: int = 50000) -> str:
     """Format collected session messages into a context string.
 
     Args:
         all_messages: List of messages with timestamps
         max_messages: Maximum number of recent messages to include (default 30)
-        max_chars: Maximum character length for the context (default 12500)
+        max_chars: Maximum character length for the context (default 50000)
 
     Returns:
         Formatted context string
     """
-    import logging
 
     logger = logging.getLogger(__name__)
 
@@ -407,10 +488,8 @@ def _format_session_messages(all_messages: List[dict], max_messages: int = 50, m
         msg = msg_info["message"]
         role = msg.role
 
-        content_text = " ".join(
-            item.text for item in msg.content
-        ).strip()
-        
+        content_text = extract_content(msg.content)
+
         clean_text = content_text.replace('\n', ' ')
         context_text += f"[{role}]: {clean_text}\n"
 
@@ -438,7 +517,6 @@ async def get_last_message_ts(in_memory: Optional['ReMeInMemoryMemory'] = None):
     Returns:
         The timestamp of the last message from session or None if not found
     """
-    import logging
     logger = logging.getLogger(__name__)
 
     # First try getting the last message from in_memory

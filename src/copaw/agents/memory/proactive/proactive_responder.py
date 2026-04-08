@@ -26,7 +26,8 @@ from .proactive_utils import (
 from ...tools import (
     browser_use,
     read_file,
-    execute_shell_command
+    execute_shell_command,
+    desktop_screenshot
 )
 
 
@@ -66,7 +67,8 @@ async def generate_proactive_response(
     # Combine and build memory context
     memory_context_str = await build_proactive_memory_context(
         agent_workspace_path=str(workspace.workspace_dir),
-        workspace=workspace
+        workspace=workspace,
+        agent=agent
     )
 
 
@@ -155,6 +157,7 @@ async def _initialize_single_proactive_agent(session_id: str, workspace, agent_i
     toolkit.register_tool_function(browser_use)
     toolkit.register_tool_function(read_file)
     toolkit.register_tool_function(execute_shell_command)
+    toolkit.register_tool_function(desktop_screenshot)
 
     # Load session state if it exists
     try:
@@ -232,29 +235,20 @@ async def _execute_query(query: str, agent) -> ProactiveQueryResult:
         role="user",
         content = f"""Task: Answer: {query} using tools --
                     `browser_use` primary, `execute_shell_command`/`read_file` only if essential.
-                    Self-check: Did you retrieve new, query-relevant data?
+                    Self-check: Did you retrieve new, query-relevant data or complete given task?
                     Output: Query answer and end strictly with `[SUCCESS]` (yes) or `[FAILURE]` (no).
                     ⚠️ CRITICAL: The flag MUST be the absolute last token. No trailing text."""
     ))
 
     success = False
-    response_content = ""
-    if response and response.content:
-        if isinstance(response.content, list) and len(response.content) > 0:
-            first_content = response.content[0]
-            if isinstance(first_content, dict):
-                response_content = first_content.get('text', '')
-            elif isinstance(first_content, str):
-                response_content = first_content
-            else:
-                response_content = str(first_content)
-        else:
-            response_content = str(response.content)
 
-    if response_content:
-        match = re.search(r'\[(SUCCESS|FAILURE)\]\s*$', response_content.strip())
-        if match:
-            success = (match.group(1) == 'SUCCESS')
+    if response and response.content:
+        response_content = extract_content(response.content)
+
+        if response_content:
+            match = re.search(r'\[(SUCCESS)\]\s*$', response_content.strip())
+            if match:
+                success = True
 
     return ProactiveQueryResult(
         query=query,
