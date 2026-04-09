@@ -29,6 +29,7 @@ Output ONLY a JSON object with this structure:
 
 Rules:
 - Return 1 to 3 tasks, ordered by priority (frequency + recency).
+- Do not create query only according to the screen content, use session contexts as well.
 - Do not use any tools in inference, answer directly based on context.
 - At least return 1 task as long as the contexts are not empty.
 - No extra text—only valid JSON.
@@ -51,6 +52,7 @@ When crafting the message, consider using reference phrases like:
 - "I've seen you're concerned with [issue], here's what I found regarding that..."
 
 These phrases can help frame your message as being attentive to the user's repeated interests rather than intrusive.
+Answer in {language} language.
 
 IMPORTANT: Begin your response with the identifier "[PROACTIVE] " to indicate this is a proactive message.
 """
