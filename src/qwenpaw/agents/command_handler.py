@@ -40,6 +40,7 @@ class ConversationCommandHandlerMixin:
             "dump_history",
             "load_history",
             "long_term_memory",
+            "proactive",
         },
     )
 
@@ -534,3 +535,96 @@ class CommandHandler(ConversationCommandHandlerMixin):
     async def handle_command(self, query: str) -> Msg:
         """Process system commands (alias for handle_conversation_command)."""
         return await self.handle_conversation_command(query)
+
+    async def _process_proactive(
+    self,
+    _messages: list[Msg],
+    args: str = "",
+    ) -> Msg:
+        """Process /proactive command to manage proactive conversation feature."""
+        args = args.strip().lower()
+
+        if not args or args == "on":
+            try:
+                from .memory import enable_proactive_for_session
+
+                result = enable_proactive_for_session(
+                    self.agent_name,
+                    30,
+                )
+                return await self._make_system_msg(
+                    "**Proactive Mode Enabled**\n\n"
+                    "- Idle time: 30 minutes\n"
+                    f"- Status: {result}\n"
+                    "- Proactive messages will be sent after "
+                    "30 minutes of inactivity"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    "**Error Enabling Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
+
+        elif args == "off":
+            try:
+                import asyncio
+                from .memory import proactive_tasks
+
+                if self.agent_name in proactive_tasks:
+                    task = proactive_tasks[self.agent_name]
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    del proactive_tasks[self.agent_name]
+
+                return await self._make_system_msg(
+                    "**Proactive Mode Disabled**\n\n"
+                    "- Proactive monitoring has been stopped\n"
+                    "- No more proactive messages will be sent"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    "**Error Disabling Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
+        else:
+            try:
+                minutes = int(args)
+                if minutes <= 0:
+                    return await self._make_system_msg(
+                        "**Invalid Minutes Value**\n\n"
+                        "- Value must be a positive integer\n"
+                        "- Example: /proactive 45 (for 45 minutes)"
+                    )
+
+                from .memory import enable_proactive_for_session
+
+                result = enable_proactive_for_session(
+                    self.agent_name,
+                    minutes,
+                )
+                return await self._make_system_msg(
+                    "**Proactive Mode Enabled**\n\n"
+                    f"- Idle time: {minutes} minutes\n"
+                    f"- Status: {result}\n"
+                    f"- Proactive messages will be sent after "
+                    f"{minutes} minutes of inactivity"
+                )
+            except ValueError:
+                return await self._make_system_msg(
+                    "**Invalid Command Format**\n\n"
+                    "- Usage: /proactive [minutes|on|off|status]\n"
+                    "- Examples:\n"
+                    "  • /proactive (default 30 minutes)\n"
+                    "  • /proactive 45 (45 minutes idle time)\n"
+                    "  • /proactive on (default 30 minutes)\n"
+                    "  • /proactive off (disable proactive mode)\n"
+                )
+            except Exception as e:
+                return await self._make_system_msg(
+                    "**Error Configuring Proactive Mode**\n\n"
+                    f"- Error: {str(e)}"
+                )
