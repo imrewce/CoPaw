@@ -543,10 +543,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
     ) -> Msg:
         """Process /proactive command to manage proactive conversation feature."""
         args = args.strip().lower()
+        from .memory import enable_proactive_for_session
 
         if not args or args == "on":
             try:
-                from .memory import enable_proactive_for_session
+                
 
                 result = enable_proactive_for_session(
                     self.agent_name,
@@ -599,8 +600,6 @@ class CommandHandler(ConversationCommandHandlerMixin):
                         "- Value must be a positive integer\n"
                         "- Example: /proactive 45 (for 45 minutes)"
                     )
-
-                from .memory import enable_proactive_for_session
 
                 result = enable_proactive_for_session(
                     self.agent_name,

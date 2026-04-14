@@ -13,8 +13,8 @@ from .proactive_types import ProactiveConfig
 from .proactive_responder import generate_proactive_response
 from .proactive_utils import (
     get_last_message_ts,
-    ensure_tz_aware, 
-    is_agent_busy
+    ensure_tz_aware,
+    is_agent_busy,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ def enable_proactive_for_session(
     idle_minutes: int = 30,
 ) -> str:
     """Enable proactive for the given session and start monitoring."""
-    global proactive_configs, session_references
+    # Removed unused global declaration.
+    # We are only writing to the dict, not reassigning the variable itself.
 
     config = ProactiveConfig(
         enabled=True,
@@ -39,8 +40,6 @@ def enable_proactive_for_session(
         mode_enabled_time=datetime.now(timezone.utc),
     )
     proactive_configs[session_id] = config
-
-
 
     # Start the proactive trigger loop if not already running
     if session_id not in proactive_tasks or proactive_tasks[session_id].done():
@@ -51,14 +50,13 @@ def enable_proactive_for_session(
 
 
 async def _run_trigger_loop(
-        session_id: str,
+    session_id: str,
 ) -> None:
     """Internal function to run the trigger loop."""
     try:
         await proactive_trigger_loop(session_id)
     except Exception as e:
-        logger.error(f"Error in proactive trigger loop for session {session_id}: {e}")
-
+        logger.error(f"Error in proactive trigger: {e}")
 
 
 async def is_last_message_proactive(workspace: Any) -> bool:
@@ -68,53 +66,38 @@ async def is_last_message_proactive(workspace: Any) -> bool:
 
     try:
         chats = await workspace.chat_manager.list_chats()
-        if not chats:
-            return False
 
         # Find the most recently updated session
-        latest_session = max(
-            chats, 
-            key=lambda s: ensure_tz_aware(s.updated_at)
-        )
-        
+        sessions_with_ts = [(ensure_tz_aware(s.updated_at), s) for s in chats]
+        _, latest_session = max(sessions_with_ts)
+
         session_id = latest_session.session_id
         user_id = latest_session.user_id
 
-        if not session_id:
-            return False
-
         state = await workspace.runner.session.get_session_state_dict(
-            session_id, user_id
+            session_id,
+            user_id,
         )
-        if not state:
-            return False
 
         memories_data = state.get("agent", {}).get("memory", [])
-        if not memories_data:
-            return False
 
         memory = InMemoryMemory()
         memory.load_state_dict(memories_data)
         messages = await memory.get_memory()
-        
-        if not messages:
-            return False
 
         serializable_messages = agentscope_msg_to_message(messages)
-        if not serializable_messages:
-            return False
 
         latest_msg = serializable_messages[-1]
-        contents = getattr(latest_msg, 'contents', [])
+        contents = getattr(latest_msg, "contents", [])
 
         if not contents or not isinstance(contents, list):
             return "[PROACTIVE]" in str(latest_msg)
 
         for content_item in contents:
             text_content = ""
-            if hasattr(content_item, 'text'):
+            if hasattr(content_item, "text"):
                 text_content = content_item.text
-            
+
             if "[PROACTIVE]" in text_content:
                 return True
 
@@ -131,9 +114,8 @@ def _should_trigger_proactive(
     current_time: datetime,
 ) -> bool:
     """Determine if proactive trigger conditions are met."""
-    elapsed_minutes = (
-        current_time - last_interaction_tz_aware
-    ).total_seconds() / 60.0
+    elapsed_time = current_time - last_interaction_tz_aware
+    elapsed_minutes = elapsed_time.total_seconds() / 60.0
 
     if elapsed_minutes < config.idle_minutes:
         return False
@@ -170,11 +152,17 @@ async def _handle_proactive_trigger(
             return last_trigger_attempt
 
     # Check if last message is already proactive
+    # Added None checks to satisfy MyPy and ensure logic correctness
+    if config.last_user_interaction is None:
+        return last_trigger_attempt
+
     last_interaction_tz_aware = ensure_tz_aware(config.last_user_interaction)
+
+    if config.mode_enabled_time is None:
+        return last_trigger_attempt
+
     mode_enabled_time_tz_aware = ensure_tz_aware(config.mode_enabled_time)
-    print("#######last_msg_time", last_interaction_tz_aware)
-    print("#######mode_enabled_time", mode_enabled_time_tz_aware)
-    
+
     last_interaction_was_before_mode_enabled = (
         last_interaction_tz_aware <= mode_enabled_time_tz_aware
     )
@@ -185,18 +173,17 @@ async def _handle_proactive_trigger(
             return now_utc
 
     logger.info("Triggering proactive response now")
-    
+
     # Update attempt time
     new_attempt_time = now_utc
     config.running_task_id = f"proactive_{now_utc.timestamp()}"
 
     try:
-        
         responder_task = asyncio.create_task(
             generate_proactive_response(
                 session_id,
                 workspace=workspace,  # Pass workspace here
-            )
+            ),
         )
         proactive_responder_tasks[session_id] = responder_task
 
@@ -206,15 +193,15 @@ async def _handle_proactive_trigger(
             msg_preview = str(proactive_msg)[:100]
             logger.info(
                 f"Proactive message generated for session {session_id}: "
-                f"{msg_preview}..."
+                f"{msg_preview}...",
             )
 
     except Exception as e:
-        logger.error(f"Error in proactive responder for session {session_id}: {e}")
+        logger.error(f"Error in proactive responder: {e}")
     finally:
         if session_id in proactive_responder_tasks:
             del proactive_responder_tasks[session_id]
-        
+
         if session_id in proactive_configs:
             proactive_configs[session_id].running_task_id = None
 
@@ -222,10 +209,10 @@ async def _handle_proactive_trigger(
 
 
 async def proactive_trigger_loop(
-        session_id: str,
+    session_id: str,
 ) -> None:
     """Background loop that polls every 30s to detect idle periods."""
-    global proactive_configs
+    # Removed unused global declaration. Only reading from dict.
 
     last_trigger_attempt: Optional[datetime] = None
 
@@ -254,11 +241,12 @@ async def proactive_trigger_loop(
             actual_last_user_time = await get_last_message_ts(
                 workspace=workspace,
             )
-            
+
             if actual_last_user_time is not None:
                 # Fix: Always use UTC when converting timestamp
                 last_interaction_dt = datetime.fromtimestamp(
-                    actual_last_user_time, tz=timezone.utc
+                    actual_last_user_time,
+                    tz=timezone.utc,
                 )
             else:
                 last_interaction_dt = config.last_user_interaction
@@ -270,19 +258,24 @@ async def proactive_trigger_loop(
             current_time = datetime.now(timezone.utc)
 
             if not _should_trigger_proactive(
-                config, last_interaction_tz_aware, current_time
+                config,
+                last_interaction_tz_aware,
+                current_time,
             ):
                 continue
 
             # Attempt to trigger
             config.last_user_interaction = last_interaction_tz_aware
-            
+
             last_trigger_attempt = await _handle_proactive_trigger(
-                session_id, config, last_trigger_attempt, workspace
+                session_id,
+                config,
+                last_trigger_attempt,
+                workspace,
             )
 
         except asyncio.CancelledError:
-            logger.info(f"Proactive trigger loop cancelled for session {session_id}")
+            logger.info("Proactive trigger loop cancelled")
             break
         except Exception as e:
             logger.error(f"Error in proactive trigger loop: {e}")

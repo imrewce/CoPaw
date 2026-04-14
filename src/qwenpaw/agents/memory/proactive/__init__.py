@@ -6,13 +6,13 @@ from .proactive_types import (
     ProactiveStatus,
     ProactiveTask,
     ProactiveQueryResult,
-    ProactiveMemoryContext
+    ProactiveMemoryContext,
 )
 from .proactive_trigger import (
     enable_proactive_for_session,
     proactive_trigger_loop,
     proactive_tasks,
-    proactive_configs
+    proactive_configs,
 )
 from .proactive_responder import generate_proactive_response
 from .proactive_utils import extract_content

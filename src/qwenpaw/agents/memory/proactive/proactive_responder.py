@@ -46,7 +46,9 @@ async def generate_proactive_response(
     active_agent_id = get_current_agent_id()
 
     agent = await _initialize_single_proactive_agent(
-        session_id, workspace, active_agent_id
+        session_id,
+        workspace,
+        active_agent_id,
     )
 
     memory_context_str = await build_proactive_memory_context(
@@ -64,7 +66,7 @@ async def generate_proactive_response(
     tasks = await _extract_tasks_from_memory(memory_context_str, agent)
 
     if await _was_interrupted(
-        baseline_timestamp, 
+        baseline_timestamp,
         workspace,
     ):
         logger.info("Proactive response generation interrupted")
@@ -73,7 +75,7 @@ async def generate_proactive_response(
     results = []
     for task in tasks[:3]:
         if await _was_interrupted(
-            baseline_timestamp, 
+            baseline_timestamp,
             workspace,
         ):
             logger.info("Proactive response generation interrupted")
@@ -85,15 +87,12 @@ async def generate_proactive_response(
         if result.success and result.data:
             break
 
-    if await _was_interrupted(
-        baseline_timestamp, 
-        workspace,
-    ):
-        logger.info("Proactive response generation interrupted")
-        return None
-
     if results:
-        message_content = await _generate_final_message(results[-1], active_agent_id)
+        message_content = await _generate_final_message(
+            results[-1],
+            active_agent_id,
+        )
+
         if message_content:
             return message_content
 
@@ -101,9 +100,9 @@ async def generate_proactive_response(
 
 
 async def _initialize_single_proactive_agent(
-    session_id: str, 
+    session_id: str,
     workspace: Workspace,
-    agent_id: str = "proactive"
+    agent_id: str = "proactive",
 ) -> QwenPawAgent:
     """Initialize a single proactive agent instance."""
     agent_config = load_agent_config(agent_id)
@@ -116,11 +115,10 @@ async def _initialize_single_proactive_agent(
         working_dir=str(workspace.workspace_dir),
     )
 
-    mcp_clients = (
-        await workspace.mcp_manager.get_clients()
-        if workspace.mcp_manager
-        else []
-    )
+    if workspace.mcp_manager:
+        mcp_clients = await workspace.mcp_manager.get_clients()
+    else:
+        mcp_clients = []
 
     agent = QwenPawAgent(
         agent_config=agent_config,
@@ -161,7 +159,8 @@ async def _initialize_single_proactive_agent(
 
 
 async def _extract_tasks_from_memory(
-    memory_context: str, agent: QwenPawAgent
+    memory_context: str,
+    agent: QwenPawAgent,
 ) -> List[ProactiveTask]:
     """Extract likely user tasks from memory context."""
     prompt = f"{PROACTIVE_TASK_EXTRACTION_PROMPT}\n#Contexts: {memory_context}"
@@ -196,13 +195,14 @@ def _create_tasks_from_data(tasks_data: List[Dict]) -> List[ProactiveTask]:
                     query=task_data["query"],
                     priority=i + 1,
                     reason=task_data.get("why", ""),
-                )
+                ),
             )
     return tasks
 
 
 async def _execute_query(
-    query: str, agent: QwenPawAgent
+    query: str,
+    agent: QwenPawAgent,
 ) -> ProactiveQueryResult:
     """Execute a query using available tools."""
     prompt = (
@@ -217,9 +217,7 @@ async def _execute_query(
         "No trailing text."
     )
 
-    response = await agent.reply(
-        Msg(name="User", role="user", content=prompt)
-    )
+    response = await agent.reply(Msg(name="User", role="user", content=prompt))
 
     success = False
     response_content = response.get_text_content()
@@ -248,7 +246,7 @@ async def _generate_final_message(
     agent_language = load_agent_config(active_agent_id).language
     proactive_content = PROACTIVE_USER_FACING_MESSAGE_PROMPT.format(
         gathered_info=gathered_info,
-        language = agent_language,
+        language=agent_language,
     )
 
     proactive_msg_content = await send_proactive_message_via_http(
@@ -275,9 +273,7 @@ async def send_proactive_message_via_http(
     timeout_seconds: int = 60,
 ) -> str:
     """Send a proactive message by directly calling the QwenPaw API."""
-    session_id = (
-        f"proactive_mode:{active_agent_id}"
-    )
+    session_id = f"proactive_mode:{active_agent_id}"
 
     request_payload = {
         "session_id": session_id,
@@ -291,9 +287,9 @@ async def send_proactive_message_via_http(
                             "[Agent proactive_helper requesting] "
                             f"{proactive_content}"
                         ),
-                    }
+                    },
                 ],
-            }
+            },
         ],
     }
 
@@ -302,9 +298,7 @@ async def send_proactive_message_via_http(
 
     clean_base = base_url.rstrip("/")
     api_base_url = (
-        f"{clean_base}/api"
-        if not clean_base.endswith("/api")
-        else clean_base
+        f"{clean_base}/api" if not clean_base.endswith("/api") else clean_base
     )
 
     try:
@@ -327,9 +321,7 @@ async def send_proactive_message_via_http(
                             continue
 
                 if last_data:
-                    logger.info(
-                        "Proactive message sent successfully via HTTP"
-                    )
+                    logger.info("Proactive message sent successfully via HTTP")
                 else:
                     logger.warning("No valid SSE data received from agent")
 
@@ -339,9 +331,7 @@ async def send_proactive_message_via_http(
             timeout_seconds,
         )
     except Exception as e:
-        logger.error(
-            "Error calling QwenPaw API for proactive message: %s", e
-        )
+        logger.error("Error calling QwenPaw API for proactive message: %s", e)
 
     return proactive_content
 
@@ -366,7 +356,7 @@ async def _was_interrupted(
             logger.warning(f"Error checking if agent is busy: {e}")
 
     # Check if any chat was updated since the baseline timestamp
-    if workspace and hasattr(workspace, 'chat_manager'):
+    if workspace and hasattr(workspace, "chat_manager"):
         try:
             chats = await workspace.chat_manager.list_chats()
             baseline_tz_aware = ensure_tz_aware(baseline_timestamp)
@@ -381,4 +371,3 @@ async def _was_interrupted(
             logger.warning(f"Error checking chat updates: {e}")
 
     return False
-
