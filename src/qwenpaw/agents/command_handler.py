@@ -3,6 +3,7 @@
 
 This module handles system commands like /compact, /new, /clear, etc.
 """
+
 import json
 import logging
 from pathlib import Path
@@ -242,9 +243,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
             half = running_config.history_max_length // 2
             history_str = f"{history_str[:half]}\n...\n{history_str[-half:]}"
 
-        history_str += (
-            "\n\n---\n\n- Use /message <index> to view full message content"
-        )
+        history_str += "\n\n---\n\n- Use /message <index> to view full message content"
 
         # Add compact summary hint if available
         if self.memory.get_compressed_summary():
@@ -268,8 +267,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
         task_count = len(self.memory_manager.summary_tasks)
         if task_count == 0:
             return await self._make_system_msg(
-                "**No Summary Tasks**\n\n"
-                "- No pending summary tasks to wait for",
+                "**No Summary Tasks**\n\n" "- No pending summary tasks to wait for",
             )
 
         result = await self.memory_manager.await_summary_tasks()
@@ -441,8 +439,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                         # Check first message for summary marker
                         if (
                             i == 0
-                            and msg.metadata.get("has_compressed_summary")
-                            == "true"
+                            and msg.metadata.get("has_compressed_summary") == "true"
                         ):
                             has_summary_marker = True
                         if len(loaded_messages) >= MAX_LOAD_HISTORY_COUNT:
@@ -537,17 +534,16 @@ class CommandHandler(ConversationCommandHandlerMixin):
         return await self.handle_conversation_command(query)
 
     async def _process_proactive(
-    self,
-    _messages: list[Msg],
-    args: str = "",
+        self,
+        _messages: list[Msg],
+        args: str = "",
     ) -> Msg:
-        """Process /proactive command to manage proactive conversation feature."""
+        """Process /proactive command for proactive message feature."""
         args = args.strip().lower()
         from .memory import enable_proactive_for_session
 
         if not args or args == "on":
             try:
-                
 
                 result = enable_proactive_for_session(
                     self.agent_name,
@@ -558,12 +554,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
                     "- Idle time: 30 minutes\n"
                     f"- Status: {result}\n"
                     "- Proactive messages will be sent after "
-                    "30 minutes of inactivity"
+                    "30 minutes of inactivity",
                 )
             except Exception as e:
                 return await self._make_system_msg(
-                    "**Error Enabling Proactive Mode**\n\n"
-                    f"- Error: {str(e)}"
+                    "**Error Enabling Proactive Mode**\n\n" f"-{str(e)}",
                 )
 
         elif args == "off":
@@ -584,22 +579,17 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 return await self._make_system_msg(
                     "**Proactive Mode Disabled**\n\n"
                     "- Proactive monitoring has been stopped\n"
-                    "- No more proactive messages will be sent"
+                    "- No more proactive messages will be sent",
                 )
             except Exception as e:
                 return await self._make_system_msg(
-                    "**Error Disabling Proactive Mode**\n\n"
-                    f"- Error: {str(e)}"
+                    "**Error Disabling Proactive Mode**\n\n" f"- {str(e)}",
                 )
         else:
             try:
                 minutes = int(args)
                 if minutes <= 0:
-                    return await self._make_system_msg(
-                        "**Invalid Minutes Value**\n\n"
-                        "- Value must be a positive integer\n"
-                        "- Example: /proactive 45 (for 45 minutes)"
-                    )
+                    raise ValueError("Minutes must be a positive integer")
 
                 result = enable_proactive_for_session(
                     self.agent_name,
@@ -610,20 +600,16 @@ class CommandHandler(ConversationCommandHandlerMixin):
                     f"- Idle time: {minutes} minutes\n"
                     f"- Status: {result}\n"
                     f"- Proactive messages will be sent after "
-                    f"{minutes} minutes of inactivity"
+                    f"{minutes} minutes of inactivity",
                 )
-            except ValueError:
+            except Exception as e:
                 return await self._make_system_msg(
-                    "**Invalid Command Format**\n\n"
+                    "**Error Enabling Proactive Mode**\n\n"
+                    f"- {str(e)}"
                     "- Usage: /proactive [minutes|on|off|status]\n"
                     "- Examples:\n"
                     "  • /proactive (default 30 minutes)\n"
                     "  • /proactive 45 (45 minutes idle time)\n"
                     "  • /proactive on (default 30 minutes)\n"
-                    "  • /proactive off (disable proactive mode)\n"
-                )
-            except Exception as e:
-                return await self._make_system_msg(
-                    "**Error Configuring Proactive Mode**\n\n"
-                    f"- Error: {str(e)}"
+                    "  • /proactive off (disable proactive mode)\n",
                 )
