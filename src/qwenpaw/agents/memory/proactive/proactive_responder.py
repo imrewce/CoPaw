@@ -65,13 +65,6 @@ async def generate_proactive_response(
 
     tasks = await _extract_tasks_from_memory(memory_context_str, agent)
 
-    if await _was_interrupted(
-        baseline_timestamp,
-        workspace,
-    ):
-        logger.info("Proactive response generation interrupted")
-        return None
-
     results = []
     for task in tasks[:3]:
         if await _was_interrupted(
@@ -86,6 +79,12 @@ async def generate_proactive_response(
 
         if result.success and result.data:
             break
+    if await _was_interrupted(
+        baseline_timestamp,
+        workspace,
+    ):
+        logger.info("Proactive response generation interrupted")
+        return None
 
     if results:
         message_content = await _generate_final_message(
