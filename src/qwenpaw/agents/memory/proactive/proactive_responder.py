@@ -132,19 +132,6 @@ async def _initialize_single_proactive_agent(
         max_iters=agent_config.running.max_iters,
     )
 
-    try:
-        await workspace.runner.session.load_session_state(
-            session_id=session_id,
-            user_id="default",
-            agent=agent,
-        )
-    except KeyError:
-        pass
-
-    # Set memory if memory manager is available
-    if hasattr(agent, "memory") and workspace.memory_manager is not None:
-        agent.memory = workspace.memory_manager.get_in_memory_memory()
-
     return agent
 
 
