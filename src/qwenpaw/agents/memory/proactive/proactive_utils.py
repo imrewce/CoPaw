@@ -6,9 +6,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Any
 
+from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 
-from ...react_agent import QwenPawAgent
 from ....app.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ def ensure_tz_aware(dt: datetime) -> datetime:
 
 async def build_proactive_memory_context(
     workspace: Workspace,
-    agent: QwenPawAgent,
+    agent: ReActAgent,
     max_session_messages: int = 100,
     max_session_chars: int = 50000,
 ) -> str:
@@ -232,7 +232,7 @@ def extract_content(content) -> str:
 
 
 async def _analyze_screen_activity(
-    agent: QwenPawAgent,
+    agent: ReActAgent,
 ) -> Optional[str]:
     """Analyze user's screen activity using multimodal capabilities."""
     # Removed duplicate import: from agentscope.message import Msg
@@ -390,6 +390,8 @@ def _format_session_messages(
         msg = msg_info["message"]
         role = msg.role if hasattr(msg, "role") else "unknown"
         content = extract_content(msg.content)
+        if "[Agent proactive_helper requesting]" in content:
+            continue
         clean_text = content.replace("\n", " ")
         concat_text = f"[{role}]: {clean_text}\n" + context_text
         if len(concat_text) > max_chars:

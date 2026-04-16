@@ -606,7 +606,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 return await self._make_system_msg(
                     "**Error Enabling Proactive Mode**\n\n"
                     f"- {str(e)}"
-                    "- Usage: /proactive [minutes|on|off|status]\n"
+                    "- Usage: /proactive [minutes|on|off]\n"
                     "- Examples:\n"
                     "  • /proactive (default 30 minutes)\n"
                     "  • /proactive 45 (45 minutes idle time)\n"

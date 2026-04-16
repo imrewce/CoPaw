@@ -277,5 +277,5 @@ async def proactive_trigger_loop(
         except asyncio.CancelledError:
             logger.info("Proactive trigger loop cancelled")
             break
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"Error in proactive trigger loop: {e}")

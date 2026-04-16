@@ -8,19 +8,19 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict
 
 import aiohttp
+from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from agentscope.tool import Toolkit
 
 from ....app.agent_context import get_current_agent_id
 from ....app.workspace import Workspace
-from ....app.runner.utils import build_env_context
 from ....config.config import load_agent_config
-from ...react_agent import QwenPawAgent
+from ...prompt import get_active_model_supports_multimodal
 from ...tools import (
     browser_use,
-    desktop_screenshot,
     execute_shell_command,
     read_file,
+    desktop_screenshot,
 )
 from .proactive_prompts import (
     PROACTIVE_TASK_EXTRACTION_PROMPT,
@@ -103,44 +103,36 @@ async def _initialize_single_proactive_agent(
     session_id: str,
     workspace: Workspace,
     agent_id: str = "proactive",
-) -> QwenPawAgent:
+) -> ReActAgent:
     """Initialize a single proactive agent instance."""
     agent_config = load_agent_config(agent_id)
     agent_config.running.max_iters = 50
 
-    env_context = build_env_context(
-        session_id=session_id,
-        user_id="proactive_system",
-        channel="console",
-        working_dir=str(workspace.workspace_dir),
-    )
 
-    if workspace.mcp_manager:
-        mcp_clients = await workspace.mcp_manager.get_clients()
-    else:
-        mcp_clients = []
 
-    agent = QwenPawAgent(
-        agent_config=agent_config,
-        env_context=env_context,
-        mcp_clients=mcp_clients,
-        memory_manager=workspace.memory_manager,
-        request_context={
-            "session_id": session_id,
-            "user_id": "proactive_system",
-            "channel": "console",
-            "agent_id": agent_id,
-        },
-        workspace_dir=workspace.workspace_dir,
-    )
+    # Create model and formatter for the agent
+    from ...model_factory import create_model_and_formatter
+    model, formatter = create_model_and_formatter(agent_id=agent_config.id)
 
-    await agent.register_mcp_clients()
-
+    # Create toolkit and register tools conditionally
     toolkit = Toolkit()
     toolkit.register_tool_function(browser_use)
     toolkit.register_tool_function(read_file)
     toolkit.register_tool_function(execute_shell_command)
-    toolkit.register_tool_function(desktop_screenshot)
+
+    # Register desktop_screenshot only if the model supports multimodal
+    if get_active_model_supports_multimodal():
+        toolkit.register_tool_function(desktop_screenshot)
+
+    agent = ReActAgent(
+        name="ProactiveAssistant",
+        model=model,
+        sys_prompt="You are a helpful assistant.",
+        toolkit=toolkit,
+        formatter=formatter,
+        memory=None, 
+        max_iters=agent_config.running.max_iters,
+    )
 
     try:
         await workspace.runner.session.load_session_state(
@@ -151,16 +143,16 @@ async def _initialize_single_proactive_agent(
     except KeyError:
         pass
 
-    agent.toolkit = toolkit
-    if agent.memory_manager is not None:
-        agent.memory = agent.memory_manager.get_in_memory_memory()
+    # Set memory if memory manager is available
+    if hasattr(agent, 'memory') and workspace.memory_manager is not None:
+        agent.memory = workspace.memory_manager.get_in_memory_memory()
 
     return agent
 
 
 async def _extract_tasks_from_memory(
     memory_context: str,
-    agent: QwenPawAgent,
+    agent: ReActAgent,
 ) -> List[ProactiveTask]:
     """Extract likely user tasks from memory context."""
     prompt = f"{PROACTIVE_TASK_EXTRACTION_PROMPT}\n#Contexts: {memory_context}"
@@ -202,7 +194,7 @@ def _create_tasks_from_data(tasks_data: List[Dict]) -> List[ProactiveTask]:
 
 async def _execute_query(
     query: str,
-    agent: QwenPawAgent,
+    agent: ReActAgent,
 ) -> ProactiveQueryResult:
     """Execute a query using available tools."""
     prompt = (
