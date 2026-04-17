@@ -246,9 +246,9 @@ async def _generate_final_message(
 async def send_proactive_message_via_http(
     active_agent_id: str,
     proactive_content: str,
-    base_url: str = "http://127.0.0.1:8088",
     timeout_seconds: int = 60,
 ) -> str:
+    from ...tools.agent_management import resolve_agent_api_base_url
     """Send a proactive message by directly calling the QwenPaw API."""
     session_id = f"proactive_mode:{active_agent_id}"
 
@@ -273,6 +273,7 @@ async def send_proactive_message_via_http(
     headers = {"X-Agent-Id": active_agent_id}
     timeout_config = aiohttp.ClientTimeout(total=timeout_seconds)
 
+    base_url = resolve_agent_api_base_url()
     clean_base = base_url.rstrip("/")
     api_base_url = (
         f"{clean_base}/api" if not clean_base.endswith("/api") else clean_base
