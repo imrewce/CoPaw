@@ -859,11 +859,11 @@ Please fix the PRD format before confirming.
 
 ## Proactive Mode - Proactive Notification Mode
 
-Proactive Mode (Proactive Notification Mode) is an intelligent feature that allows the AI agent to actively analyze the user's current session context and screen activities after detecting that the user has been inactive for a prolonged period, and provide relevant assistance and information.
+Proactive Mode is an intelligent feature that allows the AI agent to actively analyze the user's current session context and screen activities after detecting that the user has been inactive for a prolonged period, and provide relevant assistance and information.
 
 ### Core Features
 
-- 🤖 **Intelligent Detection**: Monitors user activity status and triggers when inactivity is detected for a set period
+- 🤖 **Intelligent Detection**: Monitors session activity status and triggers when inactivity is detected for a set period
 - 🧠 **Context Analysis**: Analyzes user's conversation history and current screen content to identify potential needs
 - 🔍 **Goal Extraction**: Extracts topics that the user may be focusing on from conversation history
 - 💬 **Proactive Response**: Generates helpful and relevant proactive messages based on analysis results
@@ -873,12 +873,13 @@ Proactive Mode (Proactive Notification Mode) is an intelligent feature that allo
 #### Enable Proactive Mode
 
 ```bash
+/proactive
 /proactive <minutes>
 ```
 
 **Example:**
 
-```
+```bash
 /proactive      # Default 30 minutes, trigger proactive notification after 30 minutes of inactivity
 /proactive 60   # Trigger proactive notification after 60 minutes
 ```
@@ -897,12 +898,8 @@ Proactive Mode (Proactive Notification Mode) is an intelligent feature that allo
 4. **Query Execution**: Uses tools like browser, file reading, command execution to obtain relevant information
 5. **Response Generation**: Generates friendly and relevant proactive assistance information
 
-#### Intelligent Tool Usage
-- Prioritizes `browser_use` to get the latest information
-- Uses `execute_shell_command` and `read_file` when necessary
-- Uses `desktop_screenshot` to analyze screen on multimodal-enabled models
-
 #### Context Awareness
+
 - Focuses only on user-initiated messages, ignoring system messages
 - Avoids repeatedly sending proactive messages on the same topics
 - Prioritizes frequent and recently mentioned topics
