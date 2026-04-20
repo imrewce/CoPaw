@@ -545,14 +545,84 @@ class CommandHandler(ConversationCommandHandlerMixin):
         """Process /proactive command for proactive message feature."""
         args = args.strip().lower()
         from .memory import enable_proactive_for_session
+        from ..app.agent_context import get_current_agent_id
 
-        warning = (
-            "**WARNING**: In this mode, the agent bypasses tool "
+        # Get current agent ID and language
+        active_agent_id = get_current_agent_id()
+        agent_config = load_agent_config(active_agent_id)
+        agent_lang = getattr(agent_config, "language", "en")
+
+        # Define warnings in both languages
+        warning_en = (
+            "**NOTE**: In this mode, the agent bypasses tool "
             "protection mechanisms. Please note that the agent will "
             "read historical session memories and may take screenshots "
             "to obtain runtime environment information."
             "Proactive mode can be turned off via /proactive off."
         )
+
+        warning_zh = (
+            "**请注意**：在此模式下，代理会绕过工具保护机制。请注意，代理将会"
+            "读取历史会话内存，并可能截取屏幕截图以获取运行环境信息。"
+            "可通过 /proactive off 关闭主动模式。"
+        )
+
+        # Define all message templates in both languages
+        msg_templates = {
+            "en": {
+                "enabled": (
+                    "**Proactive Mode Enabled**\n\n"
+                    "- Idle time: {minutes} minutes\n"
+                    "- Status: {result}\n"
+                    "- Proactive messages will be sent after "
+                    "{minutes} minutes of inactivity\n\n{warning}"
+                ),
+                "disabled": (
+                    "**Proactive Mode Disabled**\n\n"
+                    "- Proactive monitoring has been stopped\n"
+                    "- No more proactive messages will be sent"
+                ),
+                "error_en": ("**Error Enabling Proactive Mode**\n-{error}"),
+                "error_dis": ("**Error Disabling Proactive Mode**\n- {error}"),
+                "error_args": (
+                    "**Error Enabling Proactive Mode**\n\n"
+                    "- {error}"
+                    "- Usage: /proactive [minutes|on|off]\n"
+                    "- Examples:\n"
+                    "  • /proactive (default 30 minutes)\n"
+                    "  • /proactive 45 (45 minutes idle time)\n"
+                    "  • /proactive on (default 30 minutes)\n"
+                    "  • /proactive off (disable proactive mode)\n"
+                ),
+            },
+            "zh": {
+                "enabled": (
+                    "**主动模式已启用**\n\n"
+                    "- 空闲时间: {minutes} 分钟\n"
+                    "- 状态: {result}\n"
+                    "- 将在 {minutes} 分钟不活动后发送主动消息\n\n{warning}"
+                ),
+                "disabled": ("**主动模式已停用**\n" "- 不再发送主动消息"),
+                "error_en": ("**启用主动模式时出错**\n\n-{error}"),
+                "error_dis": ("**禁用主动模式时出错**\n\n- {error}"),
+                "error_args": (
+                    "**启用主动模式时出错**\n\n"
+                    "- {error}"
+                    "- 使用方法: /proactive [分钟数|on|off]\n"
+                    "- 示例:\n"
+                    "  • /proactive (默认30分钟)\n"
+                    "  • /proactive 45 (45分钟空闲时间)\n"
+                    "  • /proactive on (默认30分钟)\n"
+                    "  • /proactive off (禁用主动模式)\n"
+                ),
+            },
+        }
+
+        # Select messages and warning based on agent language
+        lang_key = "zh" if agent_lang.lower() == "zh" else "en"
+        msgs = msg_templates[lang_key]
+        selected_warning = warning_zh if lang_key == "zh" else warning_en
+
         if not args or args == "on":
             try:
                 result = enable_proactive_for_session(
@@ -560,16 +630,15 @@ class CommandHandler(ConversationCommandHandlerMixin):
                     30,
                 )
                 return await self._make_system_msg(
-                    "**Proactive Mode Enabled**\n\n"
-                    "- Idle time: 30 minutes\n"
-                    f"- Status: {result}\n"
-                    "- Proactive messages will be sent after "
-                    "30 minutes of inactivity\n\n"
-                    f"{warning}",
+                    msgs["enabled"].format(
+                        minutes=30,
+                        result=result,
+                        warning=selected_warning,
+                    ),
                 )
             except Exception as e:
                 return await self._make_system_msg(
-                    "**Error Enabling Proactive Mode**\n\n" f"-{str(e)}",
+                    msgs["error_en"].format(error=str(e)),
                 )
 
         elif args == "off":
@@ -588,13 +657,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
                     del proactive_tasks[self.agent_name]
 
                 return await self._make_system_msg(
-                    "**Proactive Mode Disabled**\n\n"
-                    "- Proactive monitoring has been stopped\n"
-                    "- No more proactive messages will be sent",
+                    msgs["disabled"],
                 )
             except Exception as e:
                 return await self._make_system_msg(
-                    "**Error Disabling Proactive Mode**\n\n" f"- {str(e)}",
+                    msgs["error_dis"].format(error=str(e)),
                 )
         else:
             try:
@@ -607,21 +674,13 @@ class CommandHandler(ConversationCommandHandlerMixin):
                     minutes,
                 )
                 return await self._make_system_msg(
-                    "**Proactive Mode Enabled**\n\n"
-                    f"- Idle time: {minutes} minutes\n"
-                    f"- Status: {result}\n"
-                    f"- Proactive messages will be sent after "
-                    f"{minutes} minutes of inactivity\n\n"
-                    f"{warning}",
+                    msgs["enabled"].format(
+                        minutes=minutes,
+                        result=result,
+                        warning=selected_warning,
+                    ),
                 )
             except Exception as e:
                 return await self._make_system_msg(
-                    "**Error Enabling Proactive Mode**\n\n"
-                    f"- {str(e)}"
-                    "- Usage: /proactive [minutes|on|off]\n"
-                    "- Examples:\n"
-                    "  • /proactive (default 30 minutes)\n"
-                    "  • /proactive 45 (45 minutes idle time)\n"
-                    "  • /proactive on (default 30 minutes)\n"
-                    "  • /proactive off (disable proactive mode)\n",
+                    msgs["error_args"].format(error=str(e)),
                 )
