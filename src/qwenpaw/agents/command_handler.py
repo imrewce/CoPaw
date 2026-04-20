@@ -545,13 +545,14 @@ class CommandHandler(ConversationCommandHandlerMixin):
         """Process /proactive command for proactive message feature."""
         args = args.strip().lower()
         from .memory import enable_proactive_for_session
+
         warning = (
-                    "**WARNING**: In this mode, the agent bypasses tool "
-                    "protection mechanisms. Please note that the agent will "
-                    "read historical session memories and may take screenshots "
-                    "to obtain runtime environment information."
-                    "Proactive mode can be turned off via /proactive off."
-                )
+            "**WARNING**: In this mode, the agent bypasses tool "
+            "protection mechanisms. Please note that the agent will "
+            "read historical session memories and may take screenshots "
+            "to obtain runtime environment information."
+            "Proactive mode can be turned off via /proactive off."
+        )
         if not args or args == "on":
             try:
                 result = enable_proactive_for_session(
